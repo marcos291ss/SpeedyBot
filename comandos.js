@@ -1,0 +1,5565 @@
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const { downloadContentFromMessage } = require('@whiskeysockets/baileys');
+const axios = require('axios');
+const { exec } = require('child_process');
+const yts = require('yt-search');
+const { evaluate } = require('mathjs');
+const { downloadMediaMessage } = require('@whiskeysockets/baileys');
+const { contador, carregarContador, salvarContador, zerarContadorGrupo } = require('./utils/contador');
+
+const CampoMinado = require('./dados/campominado.js');
+const Damas = require('./dados/dama.js');
+const JogodaVelha = require('./dados/jogodavelha.js');
+const Xadrez = require('./dados/xadrez');
+const { getWeeklyWeather } = require('./comandos/clima');
+
+
+const agendamentosGrupo = require('./dados/agendamentos.json');
+const { carregarConfigGrupo, salvarConfigGrupo } = require('./utils/grupoConfig');
+const infoGp = require('./dados/infogp');
+
+const vipPath = path.join(__dirname, './dados/vip.json');
+let vipList = {};
+
+const vipCmdPath = './dados/cmdvip.json';
+
+// Carrega comandos VIP
+let cmdVIP = {};
+if (fs.existsSync(vipCmdPath)) {
+  cmdVIP = JSON.parse(fs.readFileSync(vipCmdPath, 'utf-8'));
+}
+
+// ✅ Carregar as informações do dono
+const donoInfo = JSON.parse(fs.readFileSync('./dono/info.json', 'utf-8'));
+const dono = donoInfo?.numerodono?.replace(/\D/g, '') + '@s.whatsapp.net';
+let nomebot = donoInfo?.nomebot || 'Bot';
+const muteBotUsers = new Set();
+const spamBotMap = new Map();
+
+// ✅ Comandos externos
+const menuCommand = require('./comandos/menu.js');
+const mutedPath = './dados/muted.json';
+const menuAdmCommand = require('./comandos/menuadm.js');
+const menuJogosCommand = require('./comandos/menuJogos.js');
+const menuDonoCommand = require('./comandos/menudono.js');
+const menuZoeiraCommand = require('./comandos/menuzoeira.js');
+const menuRankCommand = require('./comandos/menurank.js');
+const pathblock = './dados/bloqueados.json';
+const { agendamentos, salvarAgendamentos } = require('./utils/agendamentos');
+const { handleNamorar } = require('./comandos/namorar');
+
+// **Carregue o contador assim que o bot iniciar**
+carregarContador();
+let mutedUsers = carregarMutados();
+const floodBot = {};
+const ignoradosBot = {};
+const groupMetadataCache = {}; // cache simples
+const { getMessageText } = require('./utils/mensagem');
+
+const advFile = './dados/advertencias.json';
+if (!fs.existsSync(advFile)) fs.writeFileSync(advFile, '{}');
+
+    //   FUNÇÕES  //
+function identificarAlvo(msg, sender) {
+const citado = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid?.[0] ||
+msg.message?.extendedTextMessage?.contextInfo?.participant ||
+sender;
+return citado;
+}
+function identificarAlvo(msg, sender) {
+  const context = msg.message?.extendedTextMessage?.contextInfo || msg.message?.contextInfo || {};
+  const mencionado = context.mentionedJid?.[0];
+  const citado = context.participant;
+  return typeof mencionado === 'string' ? mencionado :
+         typeof citado === 'string' ? citado :
+         sender;
+}
+function carregarMutados() {
+  try {
+    if (!fs.existsSync(mutedPath)) fs.writeFileSync(mutedPath, JSON.stringify({}));
+    return JSON.parse(fs.readFileSync(mutedPath));
+  } catch (err) {
+    console.error('Erro ao carregar mutados:', err);
+    return {};
+  }
+}
+
+function salvarMutados(mutedUsers) {
+  try {
+    fs.writeFileSync(mutedPath, JSON.stringify(mutedUsers, null, 2));
+  } catch (err) {
+    console.error('Erro ao salvar mutados:', err);
+  }
+}
+
+// Função para salvar
+function salvarAdvs(data) {
+  fs.writeFileSync(advFile, JSON.stringify(data, null, 2));
+}
+  
+function carregarBloqueados() {
+  try {
+    if (!fs.existsSync(pathblock)) {
+      fs.writeFileSync(pathblock, JSON.stringify([]));
+    }
+    const dados = fs.readFileSync(pathblock, 'utf8');
+    return JSON.parse(dados);
+  } catch (e) {
+    console.error('Erro ao carregar bloqueados:', e);
+    return [];
+  }
+}
+function salvarBloqueados(lista) {
+  try {
+    fs.writeFileSync(pathblock, JSON.stringify(lista, null, 2));
+  } catch (e) {
+    console.error('Erro ao salvar bloqueados:', e);
+  }
+}
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function saveCmdVIP() {
+  fs.writeFileSync(vipCmdPath, JSON.stringify(cmdVIP, null, 2));
+}
+function reloadCmdVIP() {
+  if (fs.existsSync(vipCmdPath)) {
+    cmdVIP = JSON.parse(fs.readFileSync(vipCmdPath, 'utf-8'));
+  }
+}
+
+function loadVIP() {
+  if (fs.existsSync(vipPath)) {
+    try {
+      vipList = JSON.parse(fs.readFileSync(vipPath, 'utf-8'));
+    } catch {
+      vipList = {};
+    }
+  }
+}
+function saveVIP() {
+  fs.writeFileSync(vipPath, JSON.stringify(vipList, null, 2));
+}
+function isVIP(jid) {
+  const now = Date.now();
+  if (vipList[jid] && vipList[jid].expira > now) {
+    return true;
+  } else {
+    delete vipList[jid];
+    saveVIP();
+    return false;
+  }
+}
+loadVIP();
+
+// ============================== //
+async function getSafeGroupMetadata(sock, jid) {
+  try {
+    if (!jid.endsWith('@g.us')) return null;
+    return await sock.groupMetadata(jid);
+  } catch (err) {
+    console.error('Erro ao obter metadata do grupo:', err?.message || err);
+    return null;
+  }
+}
+
+async function getGroupMetadataCached(jid, sock) {
+  if (groupMetadataCache[jid]) {
+    return groupMetadataCache[jid];
+  }
+
+  const metadata = await getSafeGroupMetadata(sock, jid);
+  if (metadata) groupMetadataCache[jid] = metadata;
+  return metadata;
+}
+
+async function executarComandos(sock, msg, from, msgLower, isGroup, sender, pushName) {
+  if (!msgLower) return;
+  const grupoInfo = isGroup ? await sock.groupMetadata(from) : {};
+  const senderId = msg.key.participant || msg.key.remoteJid;
+  const isGroupAdmin = isGroup && grupoInfo?.participants?.some(p => p.id === senderId && p.admin);
+  const text = msg.message?.conversation ||
+               msg.message?.extendedTextMessage?.text ||
+               msg.message?.imageMessage?.caption ||
+               msg.message?.videoMessage?.caption ||
+               '';               
+const body = (msg.message?.conversation ||
+              msg.message?.extendedTextMessage?.text ||
+              msg.message?.imageMessage?.caption ||
+              msg.message?.videoMessage?.caption ||
+              msg.message?.documentMessage?.caption ||
+              msg.message?.buttonsResponseMessage?.selectedButtonId ||
+              msg.message?.listResponseMessage?.singleSelectReply?.selectedRowId ||
+              '').trim();               
+
+// ===================== MENUS =====================
+
+// Menu principal
+if (isGroup && msgLower === 'menu') {
+    await sleep(700);  
+    await menuCommand(msg, sock, from);
+} 
+// Menu administrativo
+else if (isGroup && msgLower === 'menuadm') {
+    await sleep(600);
+    await menuAdmCommand(msg, sock, from);
+}
+// Menu do dono
+else if (isGroup && msgLower === 'menudono') {
+    await sleep(500);
+    await menuDonoCommand(msg, sock, from);
+}
+// Menu zoeira
+else if (msgLower === 'menuzoeira') {
+    await menuZoeiraCommand(msg, sock, from);
+}
+// Menu jogos
+else if (isGroup && msgLower === 'menujogos') {
+    await sleep(500);
+    await menuJogosCommand(msg, sock, from);
+}
+// Menu ranks
+else if (isGroup && msgLower === 'menurank') {
+    await sleep(500);
+    await menuRankCommand(msg, sock, from);
+}
+
+
+// ===== CAMPO MINADO =====
+else if (/^campominado\b/i.test(text)) {
+    await CampoMinado.startChallenge(sock, msg, from, isGroup);
+} 
+
+// ===== DAMAS =====
+else if (/^dama\b/i.test(text)) { // ⬅️ Trigger para iniciar o Damas
+    await Damas.startChallenge(sock, msg, from, isGroup);
+} 
+else if (/^(sim|s|não|nao|n)$/i.test(text)) {
+    // Verifica se existe partida de Damas aguardando
+    if (Damas.games[from] && Damas.games[from].status === 'aguardando') {
+        await Damas.acceptOrDecline(sock, msg, from, text.toLowerCase());
+    }
+} 
+// Fazer jogada no Damas (ex: "A3 B4")
+else if (/^[A-H][1-8]\s*[A-H][1-8]$/i.test(text)) {
+    if (Damas.games[from] && Damas.games[from].status === 'jogando') {
+        await Damas.makeMove(sock, msg, from, text.toUpperCase());
+    }
+}
+// Resetar partida de Damas
+else if (/^resetdama$/i.test(text)) {
+    await Damas.resetGame(sock, msg, from);
+}
+
+// ===== XADREZ =====
+else if (/^xadrez\b/i.test(text)) { // ⬅️ Trigger para iniciar o Xadrez
+    await Xadrez.startChallenge(sock, msg, from, isGroup);
+} 
+else if (/^(sim|s|não|nao|n)$/i.test(text)) {
+    // Primeiro verifica Campo Minado
+    if (CampoMinado.games[from] && CampoMinado.games[from].status === 'aguardando') {
+        await CampoMinado.acceptOrDecline(sock, msg, from, text.toLowerCase());
+    }
+    // Depois Jogo da Velha
+    else if (JogodaVelha.games[from] && JogodaVelha.games[from].status === 'aguardando') {
+        await JogodaVelha.acceptOrDecline(sock, msg, from, text.toLowerCase());
+    }
+    // Depois Xadrez
+    else if (Xadrez.games[from] && Xadrez.games[from].status === 'aguardando') {
+        await Xadrez.acceptOrDecline(sock, msg, from, text.toLowerCase());
+    }
+}
+
+// Fazer jogada no Campo Minado
+else if (/^[A-H][1-8]$/i.test(text)) {
+    await CampoMinado.makeMove(sock, msg, from, text.toUpperCase());
+} 
+// Fazer jogada no Xadrez
+else if (/^[A-H][1-8]\s*[A-H][1-8]$/i.test(text)) {
+    await Xadrez.makeMove(sock, msg, from, text.toUpperCase());
+} 
+// ===== JOGO DA VELHA =====
+else if (/^jogodavelha\b/i.test(text)) {
+    await JogodaVelha.startChallenge(sock, msg, from, isGroup);
+}
+// Fazer jogada no Jogo da Velha (1-9 ou linha coluna)
+else if (/^[1-9]$/.test(text) || /^[1-3]\s*[ ,;:-]?\s*[1-3]$/.test(text)) {
+    await JogodaVelha.makeMove(sock, msg, from, text);
+} 
+
+else if (/^resetxadrez$/i.test(text)) {
+    await Xadrez.resetGame(sock, msg, from);
+}
+
+
+// ===== CLIMA =====
+else if (msgLower === 'clima') {
+  const cidadePadrao = 'São Paulo'; // você pode trocar ou puxar de config de grupo
+  const previsao = await getWeeklyWeather(cidadePadrao, 7);
+  await sock.sendMessage(from, { text: previsao }, { quoted: msg });
+}
+
+  else if (/^([#])?ping$/i.test(msgLower)) {
+  await sleep(100);
+    const { performance } = require('perf_hooks');
+    try {
+      await sock.sendMessage(from, {
+        react: {
+          text: '⚡',
+          key: msg.key
+        }
+      });
+      const startTime = performance.now();
+      await sock.sendMessage(from, {
+        text: '*⏳𝘊𝘢𝘭𝘤𝘶𝘭𝘢𝘯𝘥𝘰 𝘷𝘦𝘭𝘰𝘤𝘪𝘥𝘢𝘥𝘦...*',
+        contextInfo: {
+          externalAdReply: {
+            title: '𝘊𝘢𝘭𝘤𝘶𝘭𝘢𝘯𝘥𝘰 𝘱𝘪𝘯𝘨...',
+            body: '⏱️𝘈𝘨𝘶𝘢𝘳𝘥𝘦',
+            thumbnailUrl: 'https://files.catbox.moe/qnhouw.gif',
+            sourceUrl: 'https://www.youtube.com/channel/UCF6dDTE8uON-PbWQz-xPIvA',
+            mediaType: 1,
+            renderLargerThumbnail: false,
+            showAdAttribution: false
+          }
+        }
+      });
+      const endTime = performance.now();
+      const velocidade = Math.floor(endTime - startTime);
+      const used = process.memoryUsage().rss / 1024 / 1024;
+      const totalRam = os.totalmem() / 1024 / 1024;
+      const cpuInfo = os.cpus()?.[0]?.model || 'CpuQuântico';
+      const uptimeSec = Math.floor(process.uptime());
+      const uptimeHoras = Math.floor(uptimeSec / 3600);
+      const uptimeMin = Math.floor((uptimeSec % 3600) / 60);
+      const uptimeRest = uptimeSec % 60;
+      const plataforma = os.platform();
+      const arquitetura = os.arch();
+      const thumbnailFinal = velocidade > 360
+        ? ''
+        : 'https://files.catbox.moe/3ei78v.jpg';
+      const textoFinal =
+        `*𝘝𝘦𝘭𝘰𝘤𝘪𝘥𝘢𝘥𝘦 𝘮𝘦𝘥𝘪𝘥𝘢 𝘦𝘮 ${velocidade}ms!*\n` +
+        `🧠 *𝘊𝘗𝘜:* ${cpuInfo}\n` +
+        `📊 *𝘙𝘈𝘔 𝘌𝘔 𝘜𝘚𝘖:* ${used.toFixed(2)}MB\n` +
+        `📊 *𝘙𝘈𝘔 𝘛𝘖𝘛𝘈𝘓:* ${totalRam.toFixed(2)}MB\n` +
+        `📱 *𝘚𝘐𝘚𝘛𝘌𝘔𝘈:* ${plataforma} ${arquitetura}\n` +
+        `🕐 *𝘛𝘔𝘗 𝘖𝘕𝘓𝘐𝘕𝘌:* ${uptimeHoras}h ${uptimeMin}m ${uptimeRest}s`;
+      await sock.sendMessage(from, {
+        text: textoFinal,
+        contextInfo: {
+          externalAdReply: {
+            title: 'Ping concluído!',
+            body: `⚡ ${velocidade}ms`,
+            thumbnailUrl: thumbnailFinal,
+            sourceUrl: 'https://www.youtube.com/channel/UCF6dDTE8uON-PbWQz-xPIvA',
+            mediaType: 1,
+            renderLargerThumbnail: false,
+            showAdAttribution: false
+          }
+        }
+      });
+    } catch (err) {
+      await sock.sendMessage(from, { text: '❌ Erro ao medir ping.' }, { quoted: msg });
+      console.error('Erro ao medir ping:', err);
+    }
+  }
+
+else if (isGroup && msgLower.trim() === 'bot') {
+  const senderId = msg.key.participant || msg.key.remoteJid;
+  if (ignoradosBot?.[senderId] && Date.now() < ignoradosBot[senderId]) {
+    return;
+  }
+
+  if (!floodBot[senderId]) floodBot[senderId] = [];
+  floodBot[senderId].push(Date.now());
+  floodBot[senderId] = floodBot[senderId].filter(ts => Date.now() - ts < 5000);
+
+  if (floodBot[senderId].length >= 3) {
+    ignoradosBot[senderId] = Date.now() + 10 * 60 * 1000;
+    await sock.sendMessage(from, {
+      text: '🖐️ Ei, calma lá! Tá flodando meu sistema, criatura 😠',
+    }, { quoted: msg });
+    try {
+      await sock.sendMessage(from, {
+        sticker: fs.readFileSync('./dados/figurinhas/flodbot.webp')
+      }, { quoted: msg });
+    } catch (e) {
+      console.error('Erro ao enviar sticker de flood:', e);
+    }
+    return;
+  }
+
+  const frasesBot = [
+    '*ooie to aqui, linda e bela🧚🏻‍♀️*', //1
+    '*fala comigo, bb an ?...* 😚',  //2
+    ';-;', //3
+    '*me chamou, mozão cachorro do agrado rs?*', //4
+    'posso nem descansar corno', //5
+    '*Como possso te ajudar hoje ?* 🙂', //6
+    '👁👁', //7 
+    '*me trata com carinho, viu?* 💅', //8
+    '*O mais lindo do grupo ta on✨', //9
+    '*tô de olho nesse grupo*👁️👁️', //10
+    '*vc de novo criatura me ama so pode*',
+    '*falar comigo é perigoso, posso te viciar*😹',
+    '*aaaaaaaa*',
+    'oque e fresco posso nem descansar mais',
+    'bot é tu, kkkkkkk'
+  ];
+
+  const figurinhasBot = [
+    './dados/figurinhas/bot1.webp',
+    './dados/figurinhas/bot2.webp',
+    './dados/figurinhas/bot3.webp',
+    './dados/figurinhas/bot4.webp',
+    './dados/figurinhas/bot5.webp',
+    './dados/figurinhas/bot6.webp',
+    './dados/figurinhas/bot7.webp',
+    './dados/figurinhas/bot8.webp',
+    './dados/figurinhas/bot9.webp',
+    './dados/figurinhas/bot10.webp',
+    './dados/figurinhas/bot11.webp',
+    './dados/figurinhas/bot12.webp',
+    './dados/figurinhas/bot13.webp',
+    './dados/figurinhas/bot14.webp',
+    './dados/figurinhas/bot15.webp'
+  ];
+
+  const index = Math.floor(Math.random() * frasesBot.length);
+  const fraseAleatoria = frasesBot[index];
+  const figurinhaPath = figurinhasBot[index];
+
+  await sock.sendMessage(from, {
+    text: fraseAleatoria,
+  }, { quoted: msg });
+
+  try {
+    await sock.sendMessage(from, {
+      sticker: fs.readFileSync(figurinhaPath)
+    }, { quoted: msg });
+  } catch (e) {
+    console.error(`Erro ao enviar figurinha ${figurinhaPath}:`, e);
+    // já enviou o texto, então só loga
+  }
+
+  try {
+    await sock.sendMessage(from, {
+      react: { text: '💎', key: msg.key }
+    });
+  } catch (e) {
+    console.error('Erro ao reagir:', e);
+  }
+}
+
+else if (msgLower.startsWith('nomebot ')) {
+  if (!donoInfo || !donoInfo.numerodono) {
+    await sock.sendMessage(from, {
+      text: '❌ O número do dono atual não está configurado corretamente.'
+    }, { quoted: msg });
+    return;
+  }
+  const numeroDonoAtual = donoInfo.numerodono.replace(/\D/g, '');
+  const senderRaw = msg.key.participant || msg.key.remoteJid || sender || '';
+  const numeroSender = String(senderRaw).split('@')[0].replace(/\D/g, '');
+  const numeroBot = (sock?.user?.id || '').split('@')[0].replace(/\D/g, '');
+  const isDono = numeroSender === numeroDonoAtual;
+  const isBot = msg.key.fromMe === true;
+  if (!isDono && !isBot) {
+    await sock.sendMessage(from, {
+      text: '❌ Apenas o dono atual ou o próprio bot pode alterar o nome do bot.'
+    }, { quoted: msg });
+    return;
+  }
+  const novoNome = body.slice(body.indexOf(' ') + 1).trim(); // usa body pra manter maiúsculas
+  if (!novoNome || novoNome.length < 3) {
+    await sock.sendMessage(from, {
+      text: '⚠️ Use: nomebot NomeDoBot'
+    }, { quoted: msg });
+    return;
+  }
+  donoInfo.nomebot = novoNome;
+  fs.writeFileSync('./dono/info.json', JSON.stringify(donoInfo, null, 2));
+  if (typeof nomebot !== 'undefined') nomebot = novoNome;
+  await sock.sendMessage(from, {
+    text: `☑️Nome atualizado para:\n😸 *${novoNome}*`
+  }, { quoted: msg });
+}
+
+   else if (isGroup && /^([#])?verlista\b/i.test(msgLower)) {
+   await sleep(900);
+    const grupoPath = `./dados/grupos/${from}.json`;
+     if (!fs.existsSync(grupoPath)) return await sock.sendMessage(from, { text: '⚠️     Nenhuma lista negra encontrada.', quoted: msg });
+     const config = JSON.parse(fs.readFileSync(grupoPath));
+     const lista = config.listanegra || [];
+     if (lista.length === 0) return await sock.sendMessage(from, { text: '✅Nenhum número na lista negra.', quoted: msg });
+     const numeros = lista.map(n => `@${n.split('@')[0]}`).join('\n');
+    await sock.sendMessage(from, { text: `🛑 *Lista Negra:*\n\n${numeros}`, mentions: lista }, { quoted: msg });
+}
+
+else if (isGroup && /^([#])?dono$/i.test(msgLower)) {
+    await sock.sendMessage(from, {
+      react: {
+        text: '👑',
+        key: msg.key
+      }
+    });  
+  const getBuffer = async (url) => (await axios.get(url, { responseType: 'arraybuffer' })).data;
+  const info = JSON.parse(fs.readFileSync('./dono/info.json', 'utf-8'));
+  const nomeDono = info.nick || 'Dono';
+  const numeroDono = info.numerodono || '559999999999';
+  const nomeBot = info.nomebot || 'Bot';
+  const thumbnail = await getBuffer('https://files.catbox.moe/aeakfl.jpg'); // miniatura
+  const vcard = `
+BEGIN:VCARD
+VERSION:3.0
+FN:${nomeDono}
+ORG:${nomeBot};
+TEL;type=CELL;type=VOICE;waid=${numeroDono}:+${numeroDono}
+END:VCARD`.trim();
+  await sock.sendMessage(from, {
+    contacts: {
+      displayName: nomeDono,
+      contacts: [{ vcard }]
+    },
+    contextInfo: {
+      externalAdReply: {
+        title: `👑 𝗗𝗼𝗻𝗼 𝗱𝗼 ${nomeBot}`,
+        body: `𝗖𝗼𝗻𝘁𝗮𝘁𝗼 𝗱𝗲 ${nomeDono}`,
+        mediaType: 1,
+        renderLargerThumbnail: true,
+        previewType: 0,
+        thumbnail,
+        sourceUrl: 'https://wa.me/qr/FVXHABQQZ4OIO1'
+      }
+    }
+  }, { quoted: msg });
+} 
+
+else if (isGroup && msgLower.startsWith('tirardalista')) {
+  await sleep(900);
+
+  if (!isGroupAdmin) {
+    await sock.sendMessage(from, { text: '❌ Apenas administradores podem usar este comando.' }, { quoted: msg });
+    return;
+  }
+
+  const grupoPath = `./dados/grupos/${from}.json`;
+  if (!fs.existsSync(grupoPath)) {
+    fs.writeFileSync(grupoPath, JSON.stringify({ listanegra: [] }, null, 2));
+  }
+
+  const configGrupo = JSON.parse(fs.readFileSync(grupoPath));
+  if (!configGrupo.listanegra) configGrupo.listanegra = [];
+
+  let alvo = null;
+
+  const mentioned = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid?.[0];
+  const replyParticipant = msg.message?.extendedTextMessage?.contextInfo?.participant;
+
+  if (mentioned) {
+    alvo = mentioned;
+  } else if (replyParticipant) {
+    alvo = replyParticipant;
+  } else {
+    // Coleta todos os dígitos do texto, mesmo separados
+    const numeros = text.match(/\d+/g);
+    if (numeros) {
+      const numeroLimpo = numeros.join('');
+      if (numeroLimpo.length >= 10 && numeroLimpo.length <= 15) {
+        alvo = numeroLimpo + '@s.whatsapp.net';
+      }
+    }
+  }
+
+  if (!alvo) {
+    await sock.sendMessage(from, {
+      text: '❌ Marque um usuário, responda uma mensagem ou digite o número para remover da lista negra.'
+    }, { quoted: msg });
+    return;
+  }
+
+  if (!configGrupo.listanegra.includes(alvo)) {
+    await sock.sendMessage(from, {
+      text: `❌ O número ${alvo.replace(/@s\.whatsapp\.net/, '')} não está na lista negra.`
+    }, { quoted: msg });
+    return;
+  }
+
+  configGrupo.listanegra = configGrupo.listanegra.filter(n => n !== alvo);
+  fs.writeFileSync(grupoPath, JSON.stringify(configGrupo, null, 2));
+
+  await sock.sendMessage(from, {
+    text: `✅ O número ${alvo.replace(/@s\.whatsapp\.net/, '')} foi removido da lista negra.`
+  }, { quoted: msg });
+}
+
+else if (isGroup && msgLower.startsWith('listanegra')) {
+  if (!isGroupAdmin) {
+    await sock.sendMessage(from, { text: '❌ Apenas administradores podem usar este comando.' }, { quoted: msg });
+    return;
+  }
+
+  const groupId = from;
+  const configPath = `./dados/grupos/${groupId}.json`;
+  if (!fs.existsSync(configPath)) {
+    fs.writeFileSync(configPath, JSON.stringify({ listanegra: [] }, null, 2));
+  }
+  const configGrupo = JSON.parse(fs.readFileSync(configPath));
+  let alvo = null;
+
+  const mentioned = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid?.[0];
+  const replyParticipant = msg.message?.extendedTextMessage?.contextInfo?.participant;
+
+  if (mentioned) {
+    alvo = mentioned;
+  } else if (replyParticipant) {
+    alvo = replyParticipant;
+  } else {
+    // Junta tudo que for dígito do comando e forma o número
+    const numeros = text.match(/\d+/g);
+    if (numeros) {
+      const numeroLimpo = numeros.join(''); // Junta tudo: [55,79,9920,9607] => 557999209607
+      if (numeroLimpo.length >= 10 && numeroLimpo.length <= 15) {
+        alvo = numeroLimpo + '@s.whatsapp.net';
+      }
+    }
+  }
+
+  if (!alvo) {
+    await sock.sendMessage(from, {
+      text: '❌ Marque um usuário, responda uma mensagem ou digite o número.'
+    }, { quoted: msg });
+    return;
+  }
+
+  if (!configGrupo.listanegra.includes(alvo)) {
+    configGrupo.listanegra.push(alvo);
+    fs.writeFileSync(configPath, JSON.stringify(configGrupo, null, 2));
+    await sock.sendMessage(from, {
+      text: `*Usuário adicionado à lista negra💀:*\n\n• ${alvo.replace(/@s\.whatsapp\.net/, '')}`
+    }, { quoted: msg });
+  } else {
+    await sock.sendMessage(from, {
+      text: `⚠️ Esse usuário já está na lista negra.`
+    }, { quoted: msg });
+  }
+}
+
+else if (msgLower.startsWith('perfil')) {
+  await sleep(900);
+  if (!isGroup) return;
+
+  // Lê dados do dono
+  const infoDono = JSON.parse(fs.readFileSync('./dono/info.json', 'utf-8'));
+  const numeroDono = infoDono.numerodono.replace(/\D/g, '');
+  const senderRaw = msg.key.participant || msg.key.remoteJid || '';
+  const senderNumero = String(senderRaw).split('@')[0].replace(/\D/g, '');
+  const isDono = senderNumero === numeroDono;
+
+  // Lê lista VIP
+  const vipPath = './dados/vip.json';
+  let vipList = {};
+  if (fs.existsSync(vipPath)) {
+    vipList = JSON.parse(fs.readFileSync(vipPath, 'utf-8'));
+  }
+
+  const senderJid = msg.key.participant || msg.key.remoteJid || sender;
+  const isVIP = Boolean(vipList[senderJid]);
+
+  // Alvo mencionado
+  const mentionedJid = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid?.[0];
+
+  // Se marcou outra pessoa e não é dono nem VIP → bloqueia
+  if (mentionedJid && !isDono && !isVIP) {
+    await sock.sendMessage(from, { text: '🚫 Apenas o dono ou usuários VIP podem ver o perfil de outras pessoas.' }, { quoted: msg });
+    return;
+  }
+
+  // Identifica alvo
+  let rawAlvo = sender;
+  if (mentionedJid && (isDono || isVIP)) rawAlvo = mentionedJid;
+  else if (msg.key.participant) rawAlvo = msg.key.participant;
+  else if (msg.key.remoteJid && msg.key.remoteJid.endsWith('@s.whatsapp.net')) rawAlvo = msg.key.remoteJid;
+
+  const alvo = typeof rawAlvo === 'string' ? rawAlvo : String(rawAlvo);
+  const userNumber = alvo?.replace(/[^0-9]/g, '') || '';
+  if (!userNumber) {
+    await sock.sendMessage(from, { text: '❌ Usuário inválido ou não identificado.' }, { quoted: msg });
+    return;
+  }
+  const userId = userNumber + '@s.whatsapp.net';
+  if (!userId || userId === 'null@s.whatsapp.net') {
+    await sock.sendMessage(from, { text: '❌ Não foi possível identificar o usuário corretamente.' }, { quoted: msg });
+    return;
+  }
+
+  try {
+    await sock.sendMessage(from, { react: { text: '🙇🏻‍♀️', key: msg.key } });
+  } catch (e) {
+    console.error('Erro ao reagir à mensagem:', e);
+  }
+
+  // Foto de perfil
+  let ppUrl;
+  try {
+    ppUrl = await sock.profilePictureUrl(userId, 'image');
+  } catch {
+    ppUrl = 'https://files.catbox.moe/590tu5.jpg';
+  }
+
+  // Thumbnail
+  let thumbnailBuffer;
+  try {
+    const res = await axios.get(ppUrl, { responseType: 'arraybuffer' });
+    thumbnailBuffer = res.data;
+  } catch (e) {
+    console.error('Erro ao baixar thumbnail:', e);
+    thumbnailBuffer = null;
+  }
+
+  // Verifica se é admin
+  let isAdminUser = false;
+  try {
+    const metadata = await sock.groupMetadata(from);
+    const participant = metadata.participants.find(p => p.id === userId);
+    isAdminUser = participant?.admin === 'admin' || participant?.admin === 'superadmin';
+  } catch {}
+
+  // Bio
+  let bio = 'Sem bio';
+  try {
+    const statusUser = await sock.fetchStatus(userId);
+    if (Array.isArray(statusUser) && statusUser.length > 0 && statusUser[0].status) {
+      if (typeof statusUser[0].status === 'object' && statusUser[0].status.status) {
+        bio = statusUser[0].status.status;
+      } else if (typeof statusUser[0].status === 'string') {
+        bio = statusUser[0].status;
+      }
+    }
+  } catch (err) {
+    console.error(`❌ Erro ao buscar recado de ${userId}:`, err);
+  }
+
+  // Contador
+  const grupoID = from;
+  try {
+    if (!contador[grupoID]) {
+      const metadata = await sock.groupMetadata(grupoID);
+      contador[grupoID] = { nome: metadata.subject || 'Grupo sem nome', usuarios: {} };
+    }
+    if (!contador[grupoID].usuarios[userId]) {
+      contador[grupoID].usuarios[userId] = {};
+    }
+    const chaves = ['mensagens', 'figurinhas', 'audios', 'fotos', 'videos'];
+    for (const chave of chaves) {
+      if (contador[grupoID].usuarios[userId][chave] === undefined) {
+        contador[grupoID].usuarios[userId][chave] = 0;
+      }
+    }
+    salvarContador();
+  } catch (err) {
+    console.error('Erro ao manipular contador:', err);
+  }
+
+  // Dados do perfil
+  const dados = contador[grupoID].usuarios[userId];
+  const mensagens = dados?.mensagens || 0;
+  const figurinhas = dados?.figurinhas || 0;
+  const audios = dados?.audios || 0;
+  const fotos = dados?.fotos || 0;
+  const videos = dados?.videos || 0;
+
+  const perfilText =
+    `👤 𝗨𝘀𝘂𝗮́𝗿𝗶𝗼 @${userNumber}\n\n` +
+    `🗒️ 𝗕𝗶𝗼: ${bio}\n` +
+    `👮 𝗔𝗱𝗺𝗶𝗻: ${isAdminUser ? '✅' : '❌'}\n` +
+    `💬 𝗠𝗲𝗻𝘀𝗮𝗴𝗲𝗻𝘀: ${mensagens}\n` +
+    `✨ 𝗙𝗶𝗴𝘂𝗿𝗶𝗻𝗵𝗮𝘀: ${figurinhas}\n` +
+    `🎵 𝗔𝘂́𝗱𝗶𝗼𝘀: ${audios}\n` +
+    `🖼️ 𝗙𝗼𝘁𝗼𝘀: ${fotos}\n` +
+    `📹 𝗩𝗶́𝗱𝗲𝗼𝘀: ${videos}`;
+
+  await sock.sendMessage(from, {
+    text: perfilText,
+    mentions: [userId],
+    contextInfo: {
+      mentionedJid: [userId],
+      externalAdReply: {
+        title: '👤 𝗣𝗘𝗥𝗙𝗜𝗟 𝗗𝗢 𝗨𝗦𝗨𝗔́𝗥𝗜𝗢',
+        body: 'Sombra 291 youtube',
+        thumbnail: thumbnailBuffer,
+        mediaType: 1,
+        showAdAttribution: false,
+        sourceUrl: 'https://wa.me/qr/FVXHABQQZ4OIO1'
+      }
+    }
+  }, { quoted: msg });
+}
+
+else if (isGroup && /^([#])?(rebaixar|rebaix)\b/i.test(msgLower)) {
+  try {
+    const donoRaw = JSON.parse(fs.readFileSync('./dono/info.json', 'utf-8')).numerodono;
+    const dono = donoRaw.replace(/\D/g, '');
+    const senderRaw = msg.key.participant || msg.key.remoteJid || '';
+    const senderSemDDD = String(senderRaw).split('@')[0].replace(/\D/g, '');   
+    if (senderSemDDD !== dono) {
+      await sock.sendMessage(from, {
+        text: '❌ Apenas o dono do bot pode usar este comando.'
+      }, { quoted: msg });
+      return;
+    }
+    const botNumber = sock.user.id.split(':')[0] + '@s.whatsapp.net';
+    const groupMetadata = await sock.groupMetadata(from);
+    const botIsAdmin = groupMetadata.participants.find(p => p.id === botNumber)?.admin;
+    if (!botIsAdmin) {
+      await sock.sendMessage(from, {
+        text: '⚠️ Eu preciso ser administrador para rebaixar alguém.'
+      }, { quoted: msg });
+      return;
+    }
+    let mentioned = [];
+    try {
+      mentioned = msg.message?.[Object.keys(msg.message)[0]]?.contextInfo?.mentionedJid || [];
+    } catch (e) {}
+    const quotedParticipant = msg.message?.extendedTextMessage?.contextInfo?.participant;
+    const alvos = new Set();
+    mentioned.forEach(jid => alvos.add(jid));
+    if (quotedParticipant) alvos.add(quotedParticipant);
+    if (alvos.size === 0) {
+      await sock.sendMessage(from, {
+        text: '❌ Marque alguém com @ ou responda à mensagem da pessoa.'
+      }, { quoted: msg });
+      return;
+    }
+    let thumbBuffer = null;
+    try {
+      const thumbRes = await axios.get(
+        'https://files.catbox.moe/r0qbb9.jpg',
+        { responseType: 'arraybuffer' }
+      );
+      thumbBuffer = thumbRes.data;
+    } catch (e) {
+      console.log('Erro ao baixar thumbnail:', e);
+    }
+    for (const jid of alvos) {
+      if (!jid.endsWith('@s.whatsapp.net')) continue;
+      if (jid === botNumber) {
+        await sock.sendMessage(from, {
+          text: '🤖 Não posso rebaixar a mim mesmo.'
+        }, { quoted: msg });
+        continue;
+      }
+      try {
+        await sock.groupParticipantsUpdate(from, [jid], 'demote');
+        const userNumber = jid.split('@')[0];
+        await sock.sendMessage(from, {
+          text: `🥲 @${userNumber} *rebaixado*.`,
+          mentions: [jid],
+          contextInfo: {
+            mentionedJid: [jid],
+            externalAdReply: {
+              title: 'Expulso da Administraçao❗',
+              body: '🫵😂',
+              thumbnail: thumbBuffer,
+              mediaType: 1,
+              showAdAttribution: false,
+              sourceUrl: `https://wa.me/${userNumber}`
+            }
+          }
+        }, { quoted: msg });
+      } catch (e) {
+        console.log('Erro ao rebaixar:', e);
+        await sock.sendMessage(from, {
+          text: `❌ Não consegui rebaixar @${jid.split('@')[0]}.`,
+          mentions: [jid]
+        }, { quoted: msg });
+      }
+    }
+  } catch (e) {
+    console.error('Erro no comando rebaixar:', e);
+    await sock.sendMessage(from, {
+      text: '❌ Ocorreu um erro ao tentar rebaixar alguém.'
+    }, { quoted: msg });
+  }
+}
+
+else if (isGroup && /^([#])?(promover|pp)\b/i.test(msgLower)) {
+  try {
+    const donoRaw = JSON.parse(fs.readFileSync('./dono/info.json', 'utf-8')).numerodono;
+    const dono = donoRaw.replace(/\D/g, '');
+    const senderRaw = msg.key.participant || msg.key.remoteJid || '';
+    const senderSemDDD = String(senderRaw).split('@')[0].replace(/\D/g, '');
+    console.log('Número dono:', dono);
+    console.log('Número sender:', senderSemDDD);
+    if (senderSemDDD !== dono) {
+      await sock.sendMessage(from, {
+        text: '❌ Apenas o dono do bot pode usar este comando.'
+      }, { quoted: msg });
+      return;
+    }
+    const botNumber = sock.user.id.split(':')[0] + '@s.whatsapp.net';
+    const groupMetadata = await sock.groupMetadata(from);
+    const botIsAdmin = groupMetadata.participants.find(p => p.id === botNumber)?.admin;
+    if (!botIsAdmin) {
+      await sock.sendMessage(from, {
+        text: '⚠️ Eu preciso ser administrador para promover alguém.'
+      }, { quoted: msg });
+      return;
+    }
+    const grupoPath = `./dados/grupos/${from}.json`;
+    let configGrupo = { antipromote: false };
+    if (fs.existsSync(grupoPath)) {
+      try {
+        configGrupo = JSON.parse(fs.readFileSync(grupoPath));
+      } catch (err) {
+        console.log('Erro ao ler config do grupo:', err);
+      }
+    }
+    const mentioned = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid 
+               || msg.message?.conversation?.contextInfo?.mentionedJid
+               || msg.message?.imageMessage?.contextInfo?.mentionedJid
+               || msg.message?.videoMessage?.contextInfo?.mentionedJid
+               || msg.message?.documentMessage?.contextInfo?.mentionedJid
+               || msg.message?.audioMessage?.contextInfo?.mentionedJid
+               || [];
+    const quotedParticipant = msg.message?.extendedTextMessage?.contextInfo?.participant;
+    const alvos = new Set();
+    mentioned.forEach(jid => alvos.add(jid));
+    if (quotedParticipant) alvos.add(quotedParticipant);
+    if (alvos.size === 0) {
+      await sock.sendMessage(from, {
+        text: '❌ Marque alguém com @ ou responda à mensagem da pessoa.'
+      }, { quoted: msg });
+      return;
+    }
+    let thumbBuffer = null;
+    try {
+      const thumbRes = await axios.get(
+        'https://i.postimg.cc/5yhQjP7L/20250702-131415.jpg',
+        { responseType: 'arraybuffer' }
+      );
+      thumbBuffer = thumbRes.data;
+    } catch (e) {
+      console.log('Erro ao baixar thumbnail:', e);
+    }
+    for (const jid of alvos) {
+      if (!jid.endsWith('@s.whatsapp.net')) continue;
+      if (jid === botNumber) {
+        await sock.sendMessage(from, {
+          text: '🤖 Não posso me auto promover, Sombra nao deixa eu fazer isso.'
+        }, { quoted: msg });
+        continue;
+      }
+      try {
+        await sock.groupParticipantsUpdate(from, [jid], 'promote');
+        const userNumber = jid.split('@')[0];
+        await sock.sendMessage(from, {
+          text: `✅ @${userNumber} foi promovido a administrador.`,
+          mentions: [jid],
+          contextInfo: {
+            mentionedJid: [jid],
+            externalAdReply: {
+              title: '👑 Parabens!',
+              body: '✨ Seja bem-vindo à realeza.',
+              thumbnail: thumbBuffer,
+              mediaType: 1,
+              showAdAttribution: false,
+              sourceUrl: `https://wa.me/${userNumber}`
+            }
+          }
+        }, { quoted: msg });
+      } catch (e) {
+        console.log('Erro ao promover:', e);
+        await sock.sendMessage(from, {
+          text: `❌ Não consegui promover @${jid.split('@')[0]}.`,
+          mentions: [jid]
+        }, { quoted: msg });
+      }
+    }
+  } catch (e) {
+    console.error('Erro no comando promover:', e);
+    await sock.sendMessage(from, {
+      text: '❌ Ocorreu um erro ao tentar promover alguém.'
+    }, { quoted: msg });
+  }
+}
+
+else if (/^(grupoofc|gpfc)\b/i.test( 
+  msg.message?.conversation?.toLowerCase() ||
+  msg.message?.extendedTextMessage?.text?.toLowerCase() ||
+  msg.message?.imageMessage?.caption?.toLowerCase() || ''
+)) { 
+  const link = "";
+  const titulo = "✨𝐆𝐑𝐔𝐏𝐎 Universo Paralelo💕";
+  const descricao = "aluguel do bot no grupo abaixo";
+  const thumbnail = "https://chat.whatsapp.com/Ezv4hMN3cEi5Eipxz714Ar?mode=ems_copy_t";
+  try {
+    await sock.sendMessage(from, {
+      text: `${link}`,
+      contextInfo: {
+        externalAdReply: {
+          title: titulo,
+          body: descricao,
+          thumbnailUrl: thumbnail,
+          sourceUrl: link,
+          mediaType: 1,
+          renderLargerThumbnail: false,
+          showAdAttribution: false
+        }
+      }
+    }, { quoted: msg });
+  } catch (e) {
+    console.error("Erro ao enviar preview", e);
+    await sock.sendMessage(from, { text: `...` }, { quoted: msg });
+  }
+}
+
+else if (isGroup && msgLower === 'stts') {
+  if (!isGroupAdmin) {
+    await sock.sendMessage(from, {
+      react: { text: '🙇🏻‍♀️', key: msg.key }
+    });
+    await sock.sendMessage(from, { text: '❌ Apenas administradores podem usar este comando.' }, { quoted: msg });
+    return;
+  }
+
+  const configPath = path.join(__dirname, 'dados', 'grupos', `${from}.json`);
+  let configGrupo = {};
+  try {
+    if (fs.existsSync(configPath)) {
+      const raw = fs.readFileSync(configPath);
+      configGrupo = JSON.parse(raw);
+    }
+  } catch (e) {
+    console.error('Erro ao ler a config do grupo:', e);
+  }
+
+  let ppUrl;
+  try {
+    ppUrl = await sock.profilePictureUrl(from, 'image');
+  } catch {
+    ppUrl = 'https://files.catbox.moe/g3o2dt.gif';
+  }
+  const thumbnailBuffer = await axios.get(ppUrl, { responseType: 'arraybuffer' }).then(res => res.data);
+
+  const statusText = `══════════════
+    🛡️ 𝗦𝗧𝗔𝗧𝗨𝗦 𝗗𝗢 𝗚𝗥𝗨𝗣𝗢 🛡️
+╰══════════════
+> ☁️ *antilink:*      ${configGrupo.antilink ? '✅' : '❌'}
+> ☁️ *antipromote:*   ${configGrupo.antipromote ? '✅' : '❌'}
+> ☁️ *antiporno:*     ${configGrupo.antiporno ? '✅' : '❌'}
+> ☁️ *antifake:*      ${configGrupo.antifake ? '✅' : '❌'}
+> ☁️ *antiloc:*      ${configGrupo.antiloc ? '✅' : '❌'}
+> ☁️ *antitrava:*     ${configGrupo.antitrava ? '✅' : '❌'} 
+> ☁️ *bemvindo:*      ${configGrupo.bemvindo ? '✅' : '❌'}
+> ☁️ *antiimg:*      ${configGrupo.antiimagem ? '✅' : '❌'}
+> ☁️ *blockgp:*       ${configGrupo.blockgp ? '✅' : '❌'}
+> ☁️ *autovisu:*       ${configGrupo.autovisu ? '✅' : '❌'}
+> ☁️ *Botoff:*       ${configGrupo.botoff ? '✅' : '❌'}
+══════════════
+`;
+  await sock.sendMessage(from, {
+    text: statusText,
+    contextInfo: {
+      externalAdReply: {
+        title: '✨ ATIVAÇÕES',
+        body: '⚜️Marcos 𝘥𝘰𝘮𝘪𝘯𝘢⚜️',
+        thumbnail: thumbnailBuffer,
+        mediaType: 1,
+        showAdAttribution: false,
+        sourceUrl: 'https://chat.whatsapp.com/Ezv4hMN3cEi5Eipxz714Ar?mode=ems_copy_t'
+      }
+    }
+  }, { quoted: msg });
+
+  return;
+}
+
+// 🔹 A partir daqui começam os comandos
+else if (isGroup && /^\.?(botoff|boton)\b/i.test(msgLower)) {
+  const isBotoff = msgLower.includes('botoff');
+  const donoInfo = JSON.parse(fs.readFileSync('./dono/info.json'));
+  const numeroDono = donoInfo.numerodono.replace(/\D/g, '');
+  const isDono = msg.author?.includes(numeroDono) || msg.key?.participant?.includes(numeroDono);
+
+  if (!isDono) {
+    await sock.sendMessage(from, { text: '❌ Apenas o dono pode usar este comando.' }, { quoted: msg });
+    return;
+  }
+
+  const grupoPath = path.resolve(__dirname, `./dados/grupos/${from}.json`);
+  if (!fs.existsSync(grupoPath)) {
+    await sock.sendMessage(from, { text: '⚠️ Grupo não configurado no sistema.' }, { quoted: msg });
+    return;
+  }
+
+  const configGrupo = JSON.parse(fs.readFileSync(grupoPath));
+  configGrupo.botoff = isBotoff; // true = bot desligado
+  fs.writeFileSync(grupoPath, JSON.stringify(configGrupo, null, 2));
+
+  const status = isBotoff ? '🔕 Bot desligado, Obrigado Sombra ate que fim.' : '🔔 Bot ligado, a sua disposição.';
+  await sock.sendMessage(from, { text: status }, { quoted: msg });
+  return;
+}
+
+// Outros comandos continuam aqui...
+else if (msgLower.startsWith('bot')) {
+  await sock.sendMessage(from, { text: 'qui é carai' }, { quoted: msg });
+}
+ 
+else if (msg.message?.conversation?.startsWith('tmss ') || msg.message?.extendedTextMessage?.text?.startsWith('tmss ')) {
+  const donoData = JSON.parse(fs.readFileSync('./dono/info.json'));
+  const numeroDono = donoData.numerodono.replace(/\D/g, '');
+  const senderRaw = msg?.key?.participant || msg?.key?.remoteJid || '';
+const senderJid = typeof senderRaw === 'string' ? senderRaw : '';
+const senderNumber = senderJid.replace(/\D/g, '');
+  if (senderNumber !== numeroDono) {
+    await sock.sendMessage(from, { text: '❌ Apenas o dono do bot pode usar este comando.' }, { quoted: msg });
+    return;
+  }
+  let texto = '';
+  if (msg.message.conversation && msg.message.conversation.startsWith('tmss ')) {
+    texto = msg.message.conversation.slice(6).trim();
+  } else if (msg.message.extendedTextMessage && msg.message.extendedTextMessage.text.startsWith('tmss ')) {
+    texto = msg.message.extendedTextMessage.text.slice(6).trim();
+  }
+  if (!texto) {
+    await sock.sendMessage(from, { text: '❌ Escreva a mensagem da transmissão.\nExemplo: .tmss BOT ONLINE NOVAMENTE' }, { quoted: msg });
+    return;
+  }
+const allChats = await sock.groupFetchAllParticipating();
+const groups = Object.values(allChats).filter(g => g.id.endsWith('@g.us'));
+const thumbnailUrl = 'https://files.catbox.moe/xrthcw.jpg';
+const thumbnailBuffer = await axios.get(thumbnailUrl, { responseType: 'arraybuffer' }).then(res => res.data);
+
+for (const group of groups) {
+  const metadata = await sock.groupMetadata(group.id);
+  const mentions = metadata.participants.map(p => p.id);
+  
+  await sock.sendMessage(group.id, {
+    text: `*📢 TRANSMISSÃO:*\n${texto}`,
+    mentions,
+    contextInfo: {
+      externalAdReply: {
+        title: '🚨 TRANSMISSÃO GLOBAL',
+        body: `Sombrav1 - by Marcos`, // ← corrigido para template literal
+        mediaType: 1,
+        thumbnail: thumbnailBuffer,
+        sourceUrl: 'https://whatsapp.com'
+      }
+    }
+  });
+
+    await new Promise(r => setTimeout(r, 1200));
+  }
+  await sock.sendMessage(from, { text: '✅ Transmissão enviada para todos os grupos com sucesso!' }, { quoted: msg });
+}
+// DOWNLOADS ///
+else if (isGroup && msgLower.startsWith('pinterest')) {
+  const termo = msgLower.replace(/^pinterest\s*/i, '').trim();
+  if (!termo) {
+    await sock.sendMessage(from, { text: '❌ Escreve algo pra eu pesquisar!\nEx: pinterest gato' }, { quoted: msg });
+    return;
+  }
+  try {
+    const axios = require('axios');
+    const { data } = await axios.get('https://api.scrapecreators.com/v1/pinterest/search', {
+      params: { query: termo },
+      headers: { 'x-api-key': 'SUA_API_KEY_AQUI' }
+    });
+    if (!data || !data.pins || !data.pins.length) {
+      await sock.sendMessage(from, { text: '😿 Nenhuma imagem encontrada!', }, { quoted: msg });
+      return;
+    }
+    const img = data.pins[Math.floor(Math.random() * data.pins.length)].image_url;
+    await sock.sendMessage(from, {
+      image: { url: img },
+      caption: `📌 Pinterest: *${termo}*`
+    }, { quoted: msg });
+  } catch (e) {
+    console.error('Erro no Pinterest:', e);
+    await sock.sendMessage(from, { text: '⚠️ Deu erro ao buscar no Pinterest. Tenta de novo depois.' }, { quoted: msg });
+  }
+}
+
+else if (/^([#])?play\b/i.test(
+  msg.message?.conversation?.toLowerCase() ||
+  msg.message?.extendedTextMessage?.text?.toLowerCase() ||
+  msg.message?.imageMessage?.caption?.toLowerCase() || ''
+)) {
+  const texto = msg.message?.conversation ||
+                msg.message?.extendedTextMessage?.text ||
+                msg.message?.imageMessage?.caption || '';
+  const query = texto.replace(/^([#])?play\b/i, '').trim();
+  if (!query) {
+    await sock.sendMessage(from, { text: '*_Você precisa enviar o nome da música ou o link do YouTube._*' }, { quoted: msg });
+    return;
+  }
+  await sock.sendMessage(from, { react: { text: "🎶", key: msg.key } });
+  await sock.sendMessage(from, { text: '_*🔎💕Procurando áudio, aguarde...*_'}, { quoted: msg });
+  let videoInfo;
+  let videoUrl = '';
+  if (query.includes('youtu')) {
+    videoUrl = query;
+    const videoId = videoUrl.split('v=')[1]?.split('&')[0];
+    const results = await yts(videoId);
+    videoInfo = results.videos[0];
+  } else {
+    try {
+      const results = await yts(query);
+      if (!results || !results.videos.length) {
+        await sock.sendMessage(from, { text: '❌ Nenhum resultado encontrado no YouTube.' }, { quoted: msg });
+        return;
+      }
+      videoInfo = results.videos[0];
+      videoUrl = videoInfo.url;
+    } catch (e) {
+      console.error('Erro na busca do YouTube:', e);
+      await sock.sendMessage(from, { text: '❌ Erro ao buscar no YouTube.' }, { quoted: msg });
+      return;
+    }
+  }
+  let agoPt = videoInfo.ago || '';
+  agoPt = agoPt
+    .replace('years ago', 'anos atrás')
+    .replace('year ago', 'ano atrás')
+    .replace('months ago', 'meses atrás')
+    .replace('month ago', 'mês atrás')
+    .replace('days ago', 'dias atrás')
+    .replace('day ago', 'dia atrás')
+    .replace('hours ago', 'horas atrás')
+    .replace('hour ago', 'hora atrás')
+    .replace('minutes ago', 'minutos atrás')
+    .replace('minute ago', 'minuto atrás');
+  const legenda = `*_🌸𝗕𝗔𝗜𝗫𝗔𝗡𝗗𝗢🎶𝗔𝗨𝗗𝗜𝗢💕..._*\n`;
+  await sock.sendMessage(from, {
+    text: legenda + videoUrl,
+    contextInfo: {
+      externalAdReply: {
+        showAdAttribution: false,
+        mediaType: 2,
+        title: videoInfo.title,
+        body: `👀 ${videoInfo.views.toLocaleString()} • 🕒 ${videoInfo.timestamp} • 📅 ${agoPt}`,
+        thumbnailUrl: videoInfo.thumbnail,
+        mediaUrl: videoUrl,
+        sourceUrl: videoUrl
+      }
+    }
+  }, { quoted: msg });
+  await new Promise(resolve => setTimeout(resolve, 2500));
+  const id = Date.now();
+  const outputDir = './dados/tmp';
+  if (!fs.existsSync(outputDir)) fs.mkdirSync(outputDir, { recursive: true });
+  const output = `${outputDir}/audio_${id}.mp3`;
+  exec(`yt-dlp --no-playlist --no-warnings --no-call-home --no-check-certificate --ignore-errors --no-overwrites -x --audio-format mp3 --cookies "/storage/D72F-0D01/Download/SanizinhaBot/dados/cookies/youtube.com_cookies.txt" -o "${output}" "${videoUrl}"`, async (err, stdout, stderr) => {
+    const erroStr = (err?.toString() || stderr || '').toLowerCase();
+    if (!fs.existsSync(output)) {
+      console.error('Erro ao baixar áudio:', err || stderr);
+      if (erroStr.includes('sign in to confirm your age') || erroStr.includes('age restriction') || erroStr.includes('requires purchase')) {
+        await sock.sendMessage(from, {
+          text: '❌ O vídeo tem *restrição de idade* 🙁\n\nDigite *infocookie* para atualizar seus cookies e tentar novamente.',
+          quoted: msg
+        });
+      } else {
+        await sock.sendMessage(from, {
+          text: '❌ Erro ao baixar o áudio. O vídeo pode estar indisponível, removido, privado ou os cookies estão desatualizados.',
+          quoted: msg
+        });
+      }
+      return;
+    }
+    const caption =
+      `🎵 *${videoInfo.title}*\n` +
+      `🕒 Duração: *${videoInfo.timestamp}*\n` +
+      `👀 Visualizações: *${videoInfo.views.toLocaleString()}*\n` +
+      `📅 Publicado: *${agoPt}*\n` +
+      `🔗 ${videoInfo.url}`;
+    await sock.sendMessage(from, {
+      audio: { url: output },
+      mimetype: 'audio/mpeg',
+      ptt: false,
+      caption: caption
+    }, { quoted: msg });
+
+    setTimeout(() => {
+      try {
+        fs.unlinkSync(output);
+      } catch (e) {
+        console.error('Erro ao apagar o arquivo:', e);
+      }
+    }, 10000);
+  });
+}
+
+// ===== COMANDO GIT COM PREVIEW =====
+else if (/^gitbot\b/i.test(msg.message?.conversation || msg.message?.extendedTextMessage?.text || '')) {
+await sock.sendMessage(from, { react: { text: "💎", key: msg.key } });
+    const sender = msg.key.participant || msg.participant || msg.key.remoteJid;
+    const githubUrl = '';
+    await sock.sendMessage(from, {
+        text: `${githubUrl}`,
+        contextInfo: {
+            externalAdReply: {
+                showAdAttribution: false,
+                mediaType: 2,
+                title: 'Sombra V1',
+                body: 'Clique para acessar o GitHub',
+                thumbnailUrl: '', // sua thumbnail
+                mediaUrl: githubUrl,
+                sourceUrl: githubUrl
+            }
+        }
+    }, { quoted: msg });
+}
+
+else if (/^([#])?playvd\b/i.test(
+  msg.message?.conversation?.toLowerCase() ||
+  msg.message?.extendedTextMessage?.text?.toLowerCase() ||
+  msg.message?.imageMessage?.caption?.toLowerCase() || ''
+)) {
+  const texto = msg.message?.conversation ||
+                msg.message?.extendedTextMessage?.text ||
+                msg.message?.imageMessage?.caption || '';
+  const query = texto.replace(/^([#])?playvd\b/i, '').trim();
+  if (!query) {
+    await sock.sendMessage(from, { text: '*_Você precisa enviar o nome do vídeo ou o link do YouTube._*' }, { quoted: msg });
+    return;
+  }
+  await sock.sendMessage(from, { react: { text: "📹", key: msg.key } });
+  await sock.sendMessage(from, { text: '_*🔎💕Procurando vídeo, aguarde...*_' }, { quoted: msg });
+  let videoInfo;
+  let videoUrl = '';
+  if (query.includes('youtu')) {
+    videoUrl = query;
+    const videoId = videoUrl.split('v=')[1]?.split('&')[0];
+    const results = await yts(videoId);
+    videoInfo = results.videos[0];
+  } else {
+    try {
+      const results = await yts(query);
+      if (!results || !results.videos.length) {
+        await sock.sendMessage(from, { text: '❌ Nenhum resultado encontrado no YouTube.' }, { quoted: msg });
+        return;
+      }
+      videoInfo = results.videos[0];
+      videoUrl = videoInfo.url;
+    } catch (e) {
+      console.error('Erro na busca do YouTube:', e);
+      await sock.sendMessage(from, { text: '❌ Erro ao buscar no YouTube.' }, { quoted: msg });
+      return;
+    }
+  }
+  let agoPt = videoInfo.ago || '';
+  agoPt = agoPt
+    .replace('years ago', 'anos atrás')
+    .replace('year ago', 'ano atrás')
+    .replace('months ago', 'meses atrás')
+    .replace('month ago', 'mês atrás')
+    .replace('days ago', 'dias atrás')
+    .replace('day ago', 'dia atrás')
+    .replace('hours ago', 'horas atrás')
+    .replace('hour ago', 'hora atrás')
+    .replace('minutes ago', 'minutos atrás')
+    .replace('minute ago', 'minuto atrás');
+  const legenda = `*_🤪Sombra 291💕_*\n`;
+  await sock.sendMessage(from, {
+    text: legenda + videoUrl,
+    contextInfo: {
+      externalAdReply: {
+        showAdAttribution: false,
+        mediaType: 2,
+        title: videoInfo.title,
+        body: `👀 ${videoInfo.views.toLocaleString()} • 🕒 ${videoInfo.timestamp} • 📅 ${agoPt}`,
+        thumbnailUrl: videoInfo.thumbnail,
+        mediaUrl: videoUrl,
+        sourceUrl: videoUrl
+      }
+    }
+  }, { quoted: msg });
+  const id = Date.now();
+  const outputDir = './dados/tmp';
+  if (!fs.existsSync(outputDir)) fs.mkdirSync(outputDir, { recursive: true });
+  const output = `${outputDir}/video_${id}.mp4`;
+  exec(`yt-dlp --no-playlist --no-warnings --no-call-home --no-check-certificate --ignore-errors --no-overwrites -f mp4 -o "${output}" "${videoUrl}"`, async (err, stdout, stderr) => {
+    if (err) {
+      await sock.sendMessage(from, { text: '❌ Erro ao baixar o vídeo.' }, { quoted: msg });
+      console.error(err);
+      return;
+    }
+    await sock.sendMessage(from, {
+      video: { url: output },
+      caption: legenda,
+    }, { quoted: msg });
+    setTimeout(() => {
+      try {
+        fs.unlinkSync(output);
+      } catch (e) {
+        console.error('Erro ao apagar o arquivo:', e);
+      }
+    }, 10000);
+  });
+}  
+
+else if (isGroup && /^([#])?rank$/i.test(msgLower)) {
+  const contadorPath = './dados/contador.json';
+  if (!fs.existsSync(contadorPath)) {
+    await sock.sendMessage(from, { text: 'Nenhuma atividade registrada ainda.' }, { quoted: msg });
+    return;
+  }
+  try {
+    await sock.sendMessage(from, { react: { text: '🏆', key: msg.key } });
+  } catch {}
+  const contador = JSON.parse(fs.readFileSync(contadorPath, 'utf-8'));
+const grupoID = from;
+const grupoContador = contador[grupoID]?.usuarios || {};
+let metadata;
+try {
+  metadata = await sock.groupMetadata(from);
+} catch (e) {
+  await sock.sendMessage(from, { text: '❌ Não foi possível pegar os dados do grupo.' }, { quoted: msg });
+  return;
+}
+const membros = metadata.participants
+  .filter(p => p.id.endsWith('@s.whatsapp.net'))
+  .map(p => p.id);
+const membrosComContagem = membros.map(id => {
+  const dados = grupoContador[id] || {};
+  return {
+    id,
+    mensagens: dados.mensagens || 0,
+    figurinhas: dados.figurinhas || 0,
+    audios: dados.audios || 0,
+    fotos: dados.fotos || 0,
+    videos: dados.videos || 0
+  };
+});
+  membrosComContagem.sort((a, b) => b.mensagens - a.mensagens);
+  const topMembros = membrosComContagem.slice(0, 20);
+  if (topMembros.length === 0) {
+    await sock.sendMessage(from, { text: '❌ Nenhum membro com mensagens registradas.' }, { quoted: msg });
+    return;
+  }
+  const numerosBonitos = ['¹', '²', '³', '⁴', '⁵', '⁶', '⁷', '⁸', '⁹', '¹⁰', '¹¹', '¹²', '¹³', '¹⁴', '¹⁵', '¹⁶', '¹⁷', '¹⁸', '¹⁹', '²⁰'];
+  let rankMsg = '🏆 *RANK DOS MAIS ATIVOS DO GRUPO*\n\n';
+  const mentions = [];
+  for (let i = 0; i < topMembros.length; i++) {
+    const { id, mensagens, figurinhas, audios, fotos, videos } = topMembros[i];
+    const numero = id.split('@')[0];
+    mentions.push(id);
+rankMsg += `╭━━━━ ⟡ ${numerosBonitos[i]} ⟡ ━━━━╮\n`;
+rankMsg += `┃ 👤@${numero}\n`;
+rankMsg += `┃ 💬ᴍᴇɴsᴀɢᴇɴs: ${mensagens}\n`;
+rankMsg += `┃ 🦄ғɪɢᴜʀɪɴʜᴀs: ${figurinhas}\n`;
+rankMsg += `┃ 🎵ᴀᴜᴅɪᴏs: ${audios}\n`;
+rankMsg += `┃ 🤳🏻ғᴏᴛᴏs: ${fotos}\n`;
+rankMsg += `┃ 📹ᴠɪᴅᴇᴏs: ${videos}\n`;
+rankMsg += `╰━━━━━━━━━━━━╯\n\n`;
+  }
+  let ppUrl;
+  try {
+    ppUrl = await sock.profilePictureUrl(from, 'image');
+  } catch {
+    ppUrl = 'https://files.catbox.moe/g3o2dt.gif';
+  }
+  let thumbnailBuffer = null;
+  try {
+    const res = await axios.get(ppUrl, { responseType: 'arraybuffer' });
+    thumbnailBuffer = res.data;
+  } catch {}
+  await sock.sendMessage(from, {
+    text: rankMsg,
+    mentions,
+    contextInfo: {
+      mentionedJid: mentions,
+      externalAdReply: {
+        title: '🏆 𝐑𝐀𝐍𝐊 𝐀𝐓𝐈𝐕𝐈𝐃𝐀𝐃𝐄',
+        body: '𝐎𝐬 𝐦𝐚𝐢𝐬 𝐚𝐭𝐢𝐯𝐨𝐬 𝐝𝐨 𝐠𝐫𝐮𝐩𝐨 estão aqui!',
+        thumbnail: thumbnailBuffer,
+        mediaType: 1,
+        showAdAttribution: false,
+        sourceUrl: 'Sombra291 youtube'
+      }
+    }
+  }, { quoted: msg });
+}
+
+else if (isGroup && msgLower.startsWith('avt')) {
+  if (!isGroupAdmin) {
+    await sock.sendMessage(from, { text: '❌ Apenas administradores podem usar este comando.' }, { quoted: msg });
+    return;
+  }
+  const configGrupo = carregarConfigGrupo(from);
+  const args = text.trim().split(/\s+/).slice(1);
+  const validRecursos = ['antilink', 'blockgp', 'antiporno', 'antifake', 'bemvindo', 'antiloc', 'antitrava'];
+  let ativados = [];
+  let invalidos = [];
+  if (args.length === 0) {
+    for (const recurso of validRecursos) {
+      configGrupo[recurso] = true;
+      ativados.push(recurso);
+    }
+  } else {
+    for (const recurso of args) {
+      const nome = recurso.toLowerCase();
+      if (validRecursos.includes(nome)) {
+        configGrupo[nome] = true;
+        ativados.push(nome);
+      } else {
+        invalidos.push(recurso);
+      }
+    }
+  }
+  salvarConfigGrupo(from, configGrupo);
+  let resposta = '';
+  if (ativados.length > 0) {
+    resposta += `☑️ *Ativados:* ${ativados.join(', ')}\n`;
+  }
+  if (invalidos.length > 0) {
+    resposta += `❌ *Inválidos:* ${invalidos.join(', ')}`;
+  }
+  await sock.sendMessage(from, { text: resposta.trim() }, { quoted: msg });
+}
+
+else if (isGroup && msgLower === 'limpar') {
+  if (!isGroupAdmin && !msg.key.fromMe) {
+    await sock.sendMessage(from, { text: '❌ Apenas admins podem usar este comando!' }, { quoted: msg });
+    return;
+  }   
+  const invisivel = '\n \n \n '.repeat(5000);
+  for (let i = 0; i < 7; i++) {
+    await sock.sendMessage(from, { text: invisivel });
+await new Promise(resolve => setTimeout(resolve, 1000));
+  }
+  await sock.sendMessage(from, { text: '*Chat limpo!*' }, { quoted: msg });
+}
+
+else if ((isGroup || !isGroup) && msgLower.startsWith('ideia')) {
+  const path = './dono/info.json';
+  if (!fs.existsSync(path)) {
+    await sock.sendMessage(from, { text: '❌ O número do dono não está configurado corretamente.' }, { quoted: msg });
+    return;
+  }
+  const info = JSON.parse(fs.readFileSync(path));
+  const numeroDono = info.numerodono + '@s.whatsapp.net';
+  const ideiatxt = msg.message?.conversation
+    || msg.message?.extendedTextMessage?.text
+    || msg.message?.imageMessage?.caption
+    || msg.message?.videoMessage?.caption
+    || '';
+  const partes = ideiatxt.trim().split(/\s+/);
+  const ideiaTexto = partes.slice(1).join(' ').trim();
+  if (!ideiaTexto) {
+    await sock.sendMessage(from, { text: '💡 Use: ideia sua sugestão aqui' }, { quoted: msg });
+    return;
+  }
+  const remetente = sender.split('@')[0];
+  const userTag = `@${remetente}`;
+  const conteudo = `💡 *NOVA IDEIA ENVIADA:*\n\n👤 Usuário: ${userTag}\n🔢 Número: wa.me/${remetente}\n\n💬 Sugestão:\n"${ideiaTexto}"`;
+  await sock.sendMessage(numeroDono, {
+    text: conteudo,
+    mentions: [sender]
+  });
+  await sock.sendMessage(from, {
+    text: '_😃💕 Sua ideia foi enviada com sucesso 🥳_',
+    quoted: msg
+  });
+}
+
+else if (isGroup && msgLower === 'infogp') {
+  try {
+    await sock.sendMessage(from, { react: { text: '🙇🏻‍♀️', key: msg.key } });
+  } catch {}
+  await sock.sendMessage(from, {
+    text: infoGp.infogp
+  }, { quoted: msg });
+}
+
+else if (isGroup && /^([#])?(del|deleta)\b/i.test(msgLower)) {
+  const botNumber = sock.user.id.split(':')[0] + '@s.whatsapp.net';
+  const groupMetadata = await getGroupMetadataCached(from, sock);
+
+  const botParticipant = groupMetadata.participants.find(p => p.id === botNumber);
+  const botIsAdmin = botParticipant?.admin === 'admin' || botParticipant?.admin === 'superadmin';
+
+  if (!botIsAdmin) {
+    await sock.sendMessage(from, { text: '⚠️ Eu preciso ser admin para apagar mensagens.' }, { quoted: msg });
+    return;
+  }
+
+  const senderId = msg.key.participant || msg.key.remoteJid;
+  const senderParticipant = groupMetadata.participants.find(p => p.id === senderId);
+  const senderIsAdmin = senderParticipant?.admin === 'admin' || senderParticipant?.admin === 'superadmin';
+
+  if (!senderIsAdmin) {
+    await sock.sendMessage(from, { text: '❌ Apenas administradores podem usar esse comando.' }, { quoted: msg });
+    return;
+  }
+
+  const contextoMsg = msg.message?.extendedTextMessage?.contextInfo;
+  const msgParaDeletar = contextoMsg?.stanzaId;
+  const participanteMsg = contextoMsg?.participant;
+
+  if (!msgParaDeletar || !participanteMsg) {
+    await sock.sendMessage(from, {
+      text: '❌ Use esse comando respondendo a uma mensagem que deseja apagar.',
+      quoted: msg
+    });
+    return;
+  }
+
+  try {
+    await sock.sendMessage(from, {
+      delete: {
+        remoteJid: from,
+        fromMe: false,
+        id: msgParaDeletar,
+        participant: participanteMsg
+      }
+    });
+  } catch (e) {
+    await sock.sendMessage(from, {
+      text: '❌ Erro ao tentar apagar a mensagem.',
+      quoted: msg
+    });
+  }
+}
+
+
+// ADDVIP (só dono pode usar)
+else if (/^addvip\b/i.test(msgLower)) {
+  if (!isGroup)
+    return await sock.sendMessage(from, { text: "❌ Esse comando só pode ser usado em grupos." }, { quoted: msg });
+
+  const donoNumero = JSON.parse(fs.readFileSync('./dono/info.json')).numerodono;
+  const senderNumero = (msg.key.participant || msg.key.remoteJid).split('@')[0];
+  if (senderNumero !== donoNumero)
+    return await sock.sendMessage(from, { text: "❌ Apenas o dono pode adicionar VIP." }, { quoted: msg });
+
+  // PEGAR ALVO (marcação, resposta ou número digitado)
+  let alvo = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid?.[0]
+           || msg.message?.extendedTextMessage?.contextInfo?.participant
+           || body.replace(/^addvip\s*/i, '').replace(/\D/g, '');
+
+  if (!alvo) {
+    return await sock.sendMessage(from, { text: "❌ Marque a pessoa, responda a mensagem dela ou digite o número." }, { quoted: msg });
+  }
+
+  if (!alvo.includes('@')) alvo += '@s.whatsapp.net';
+
+  // AGORA PEGAR DIAS SE O USUÁRIO DIGITAR
+  const diasMatch = body.replace(/\D/g, '').length >= 11 // se for número de telefone, ignora
+    ? null
+    : body.match(/\b\d+\b/);
+  const dias = diasMatch ? parseInt(diasMatch[0]) : 30;
+
+  vipList[alvo] = { expira: Date.now() + dias * 86400000 };
+  saveVIP();
+
+  await sock.sendMessage(from, { text: `✅ ${alvo.split('@')[0]} adicionado à lista VIP por ${dias} dias.` }, { quoted: msg });
+}
+
+// DELVIP (só dono pode usar)
+else if (/^delvip\b/i.test(msgLower)) {
+  if (!isGroup)
+    return await sock.sendMessage(from, { text: "❌ Esse comando só pode ser usado em grupos." }, { quoted: msg });
+
+  // Número do dono igual no addvip
+  const donoNumero = JSON.parse(fs.readFileSync('./dono/info.json')).numerodono;
+  const senderNumero = (msg.key.participant || msg.key.remoteJid).split('@')[0];
+  if (senderNumero !== donoNumero)
+    return await sock.sendMessage(from, { text: "❌ Apenas o dono pode remover VIP." }, { quoted: msg });
+
+  // PEGAR ALVO (marcação, resposta ou número digitado)
+  let alvo = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid?.[0]
+           || msg.message?.extendedTextMessage?.contextInfo?.participant
+           || body.replace(/^delvip\s*/i, '').replace(/\D/g, '');
+
+  if (!alvo) {
+    return await sock.sendMessage(from, { text: "❌ Marque a pessoa, responda a mensagem dela ou digite o número." }, { quoted: msg });
+  }
+
+  if (!alvo.includes('@')) alvo += '@s.whatsapp.net';
+
+  // Remover se existir
+  if (vipList[alvo]) {
+    delete vipList[alvo];
+    saveVIP();
+    await sock.sendMessage(from, { text: `✅ ${alvo.split('@')[0]} removido da lista VIP.` }, { quoted: msg });
+  } else {
+    await sock.sendMessage(from, { text: "❌ Essa pessoa não está na lista VIP." }, { quoted: msg });
+  }
+}
+
+// LISTAVIP - mostra todos os VIPs e tempo restante
+else if (/^listavip\b/i.test(msgLower)) {
+  if (!isGroup)
+    return await sock.sendMessage(from, { text: "❌ Esse comando só pode ser usado em grupos." }, { quoted: msg });
+
+  if (!vipList || Object.keys(vipList).length === 0) {
+    return await sock.sendMessage(from, { text: "📜 Nenhum VIP registrado." }, { quoted: msg });
+  }
+
+  const agora = Date.now();
+  let texto = "🏆 *Lista de VIPs*\n\n";
+  let mencoes = [];
+
+  for (const jid in vipList) {
+    const dados = vipList[jid];
+    const restanteMs = dados.expira - agora;
+    if (restanteMs <= 0) {
+      // Expirou → remove da lista
+      delete vipList[jid];
+      continue;
+    }
+
+    const diasRestantes = Math.ceil(restanteMs / 86400000);
+    const numero = jid.split('@')[0];
+    texto += `👤 @${numero} — ${diasRestantes} dia${diasRestantes > 1 ? 's' : ''} restantes\n`;
+    mencoes.push(jid);
+  }
+
+  saveVIP();
+
+  if (mencoes.length === 0) {
+    return await sock.sendMessage(from, { text: "📜 Nenhum VIP ativo no momento." }, { quoted: msg });
+  }
+
+  await sock.sendMessage(from, {
+    text: texto,
+    mentions: mencoes
+  }, { quoted: msg });
+}
+
+// PEG (só VIP ou dono podem usar)
+else if (/^peg\b/i.test(msgLower)) {
+  if (!isGroup)
+    return await sock.sendMessage(from, { text: "❌ Esse comando só pode ser usado em grupos." }, { quoted: msg });
+
+  // Carrega lista VIP
+  const vipPath = './dados/vip.json';
+  if (!fs.existsSync(vipPath)) {
+    return await sock.sendMessage(from, { text: '❌ Arquivo VIP não encontrado.' }, { quoted: msg });
+  }
+  const vipList = JSON.parse(fs.readFileSync(vipPath, 'utf-8'));
+  const senderJid = msg.key.participant || msg.key.remoteJid || sender;
+
+  // Verifica se o usuário é VIP
+  if (!vipList[senderJid]) {
+    return await sock.sendMessage(from, { text: "❌ Apenas usuários VIP podem usar este comando." }, { quoted: msg });
+  }
+
+  // === IDENTIFICA O ALVO ===
+  let alvo = null;
+
+  // 1️⃣ Se marcar alguém
+  if (msg.message?.extendedTextMessage?.contextInfo?.mentionedJid?.length) {
+    alvo = msg.message.extendedTextMessage.contextInfo.mentionedJid[0];
+  }
+  // 2️⃣ Se responder mensagem
+  else if (msg.message?.extendedTextMessage?.contextInfo?.participant) {
+    alvo = msg.message.extendedTextMessage.contextInfo.participant;
+  }
+  // 3️⃣ Se digitar número
+  else {
+    const num = body.replace(/^peg\s*/i, '').replace(/\D/g, '');
+    if (num) alvo = `${num}@s.whatsapp.net`;
+  }
+
+  if (!alvo) {
+    return await sock.sendMessage(from, { text: "❌ Marque a pessoa, responda a mensagem dela ou informe o número." }, { quoted: msg });
+  }
+
+  // === PEGA FOTO DE PERFIL ===
+  let ppUrl;
+  try {
+    ppUrl = await sock.profilePictureUrl(alvo, 'image');
+  } catch {
+    ppUrl = null;
+  }
+
+  if (!ppUrl) {
+    return await sock.sendMessage(from, { text: "❌ Não consegui pegar a foto de perfil." }, { quoted: msg });
+  }
+
+  // === MANDA A FOTO ===
+  try {
+    await sock.sendMessage(from, { image: { url: ppUrl }, caption: `📷 Foto de perfil de @${alvo.split('@')[0]}`, mentions: [alvo] }, { quoted: msg });
+  } catch (err) {
+    console.error("Erro ao enviar foto de perfil:", err);
+    await sock.sendMessage(from, { text: "❌ Erro ao enviar a foto de perfil." }, { quoted: msg });
+  }
+}
+
+else if (/^addcmdvip\b/i.test(msgLower)) {
+  const donoNumero = JSON.parse(fs.readFileSync('./dono/info.json')).numerodono.replace(/\D/g, '');
+  const senderNumero = (msg.key.participant || msg.key.remoteJid).split('@')[0].replace(/\D/g, '');
+
+  if (senderNumero !== donoNumero) {
+    return await sock.sendMessage(from, { text: "❌ Apenas o dono pode adicionar comandos restritos para VIP." }, { quoted: msg });
+  }
+
+  const comandoAlvo = body.replace(/^addcmdvip\s*/i, '').trim().toLowerCase();
+  if (!comandoAlvo) {
+    return await sock.sendMessage(from, { text: "❌ Informe o comando que deseja restringir para VIP.\nExemplo: .addcmdvip play" }, { quoted: msg });
+  }
+
+  cmdVIP[comandoAlvo] = true;
+  saveCmdVIP();
+  reloadCmdVIP(); // 🔄 garante que todo mundo veja a versão nova
+
+  await sock.sendMessage(from, { text: `✅ O comando "${comandoAlvo}" agora é exclusivo para VIPs.` }, { quoted: msg });
+}
+
+else if (/^delcmdvip\b/i.test(msgLower)) {
+  const donoNumero = JSON.parse(fs.readFileSync('./dono/info.json')).numerodono.replace(/\D/g, '');
+  const senderNumero = (msg.key.participant || msg.key.remoteJid).split('@')[0].replace(/\D/g, '');
+
+  if (senderNumero !== donoNumero) {
+    return await sock.sendMessage(from, { text: "❌ Apenas o dono pode remover comandos restritos para VIP." }, { quoted: msg });
+  }
+
+  const comandoAlvo = body.replace(/^delcmdvip\s*/i, '').trim().toLowerCase();
+  if (!comandoAlvo) {
+    return await sock.sendMessage(from, { text: "❌ Informe o comando que deseja liberar.\nExemplo: .delcmdvip play" }, { quoted: msg });
+  }
+
+  if (cmdVIP[comandoAlvo]) {
+    delete cmdVIP[comandoAlvo];
+    saveCmdVIP();
+    reloadCmdVIP(); // 🔄 garante que o upsert já use a versão nova
+
+    await sock.sendMessage(from, { text: `✅ O comando "${comandoAlvo}" agora está liberado para todos.` }, { quoted: msg });
+  } else {
+    await sock.sendMessage(from, { text: `ℹ️ O comando "${comandoAlvo}" já estava liberado para todos.` }, { quoted: msg });
+  }
+}
+
+// COMPRACONTA | LOJASANI
+else if (/^(compraconta|lojasani)\b/i.test(
+  msg.message?.conversation?.toLowerCase() ||
+  msg.message?.extendedTextMessage?.text?.toLowerCase() ||
+  msg.message?.imageMessage?.caption?.toLowerCase() || ''
+)) { 
+  const link = "";
+  const titulo = "🛒🧜🏻‍♀️𝗖𝗹𝗶𝗾𝘂𝗲 𝗮𝗾𝘂𝗶";
+  const descricao = "Compre contas, serviços e produtos exclusivos!";
+  const thumbnail = "https://linkfly.to/nexosfc";
+  try {
+    await sock.sendMessage(from, {
+      text: `${link}`,
+      contextInfo: {
+        externalAdReply: {
+          title: titulo,
+          body: descricao,
+          thumbnailUrl: thumbnail,
+          sourceUrl: link,
+          mediaType: 1,
+          renderLargerThumbnail: false,
+          showAdAttribution: false
+        }
+      }
+    }, { quoted: msg });
+  } catch (e) {
+    console.error("Erro ao enviar preview da loja:", e);
+    await sock.sendMessage(from, { text: `...` }, { quoted: msg });
+  }
+}
+
+else if (/^(0ii|slk0)\b/i.test(
+  msg.message?.conversation?.toLowerCase() ||
+  msg.message?.extendedTextMessage?.text?.toLowerCase() ||
+  msg.message?.imageMessage?.caption?.toLowerCase() || ''
+)) {
+  const link = "";
+  const titulo = "🔥𝗖𝗹𝗶𝗾𝘂𝗲 𝗮𝗾𝘂𝗶 𝗲 𝘃𝗲𝗺 𝘀𝗲 𝗱𝗶𝘃𝗲𝗿𝘁𝗶𝗿👻";
+  const descricao = "🌈𝘕𝘢𝘰 𝘦 𝘢 𝘥𝘪𝘴𝘯𝘦𝘺 𝘮𝘢𝘪𝘴 𝘵𝘢 𝘤𝘩𝘦𝘪𝘰 𝘥𝘦 𝘥𝘳𝘢𝘨𝘰𝘦𝘴👹🐉";
+  const thumbnail = "https://chat.whatsapp.com/B6OaB3K4A5G2BJnjiXD3t3?mode=ems_copy_t";
+  try {
+    // Pega todos os membros do grupo
+    const grupoInfo = await sock.groupMetadata(from);
+    let participantes = grupoInfo.participants.map(p => p.id);
+    if (!participantes.includes(sock.user.id)) {
+      participantes.push(sock.user.id);
+    }
+    // Repete 10 vezes
+    for (let i = 0; i < 10; i++) {
+      await sock.sendMessage(from, {
+        text: `${titulo}\n${descricao}`,
+        mentions: participantes,
+        contextInfo: {
+          externalAdReply: {
+            title: titulo,
+            body: descricao,
+            thumbnailUrl: thumbnail,
+            sourceUrl: link,
+            mediaType: 1,
+            renderLargerThumbnail: false,
+            showAdAttribution: false
+          }
+        }
+      });
+      await new Promise(resolve => setTimeout(resolve, 200)); // 0.2s entre mensagens
+    }
+
+  } catch (e) {
+    console.error("❌ Erro no comando 0ii/00i:", e);
+    try {
+      await sock.sendMessage(from, { text: '❌ Não foi possível enviar para todos.' }, { quoted: msg });
+    } catch {}
+  }
+}
+
+// ========== COMANDO ADV ========================
+else if (/^adv\b/i.test(msg.message?.conversation || msg.message?.extendedTextMessage?.text || '')) {
+    if (!isGroup) {
+        await sock.sendMessage(from, { text: '❌ Este comando só pode ser usado em grupos.' }, { quoted: msg });
+        return;
+    }
+    if (!isGroupAdmin) {
+        await sock.sendMessage(from, { text: '❌ Apenas administradores podem usar este comando.' }, { quoted: msg });
+        return;
+    }
+
+    let advs = JSON.parse(fs.readFileSync(advFile));
+
+    // Identifica usuário
+    let usuario;
+    if (msg.message?.extendedTextMessage?.contextInfo?.mentionedJid?.length) {
+        usuario = msg.message.extendedTextMessage.contextInfo.mentionedJid[0];
+    } else if (msg.message?.extendedTextMessage?.contextInfo?.participant) {
+        usuario = msg.message.extendedTextMessage.contextInfo.participant;
+    } else if (msg.message?.conversation) {
+        let partes = msg.message.conversation.split(' ');
+        if (partes[1] && partes[1].startsWith('@')) {
+            usuario = partes[1].replace('@', '') + '@s.whatsapp.net';
+        }
+    }
+
+    if (!usuario) {
+        await sock.sendMessage(from, { text: '❌ Marque alguém ou responda a uma mensagem para advertir.' }, { quoted: msg });
+        return;
+    }
+
+    // Conta advertência
+    if (!advs[usuario]) advs[usuario] = 0;
+    advs[usuario]++;
+
+    salvarAdvs(advs);
+
+    if (advs[usuario] >= 3) {
+        await sock.sendMessage(from, { text: `⚠️ @${usuario.split('@')[0]} atingiu 3/3 advertências e será removido do grupo.`, mentions: [usuario] });
+        try {
+            await sock.groupParticipantsUpdate(from, [usuario], "remove");
+        } catch {
+            await sock.sendMessage(from, { text: '❌ Não consegui remover o usuário. Verifique se sou admin.' });
+        }
+        advs[usuario] = 0;
+        salvarAdvs(advs);
+    } else {
+        await sock.sendMessage(from, { text: `⚠️ @${usuario.split('@')[0]} foi advertido ${advs[usuario]}/3 vezes.\n📌 Na 3ª será removido.`, mentions: [usuario] });
+    }
+}
+
+// ========= COMANDO TIRARADV ==========
+else if (/^tiraradv\b/i.test(msg.message?.conversation || msg.message?.extendedTextMessage?.text || '')) {
+    if (!isGroup) {
+        await sock.sendMessage(from, { text: '❌ Este comando só pode ser usado em grupos.' }, { quoted: msg });
+        return;
+    }
+    if (!isGroupAdmin) {
+        await sock.sendMessage(from, { text: '❌ Apenas administradores podem usar este comando.' }, { quoted: msg });
+        return;
+    }
+
+    let advs = JSON.parse(fs.readFileSync(advFile));
+
+    // Identifica usuário
+    let usuario;
+    if (msg.message?.extendedTextMessage?.contextInfo?.mentionedJid?.length) {
+        usuario = msg.message.extendedTextMessage.contextInfo.mentionedJid[0];
+    } else if (msg.message?.extendedTextMessage?.contextInfo?.participant) {
+        usuario = msg.message.extendedTextMessage.contextInfo.participant;
+    } else if (msg.message?.conversation) {
+        let partes = msg.message.conversation.split(' ');
+        if (partes[1] && partes[1].startsWith('@')) {
+            usuario = partes[1].replace('@', '') + '@s.whatsapp.net';
+        }
+    }
+
+    if (!usuario) {
+        await sock.sendMessage(from, { text: '❌ Marque alguém ou responda a uma mensagem para remover advertências.' }, { quoted: msg });
+        return;
+    }
+
+    if (!advs[usuario] || advs[usuario] <= 0) {
+        await sock.sendMessage(from, { text: `ℹ️ @${usuario.split('@')[0]} não possui advertências.`, mentions: [usuario] });
+        return;
+    }
+
+    advs[usuario] = 0; // zera
+    salvarAdvs(advs);
+
+    await sock.sendMessage(from, { text: `✅ Todas as advertências de @${usuario.split('@')[0]} foram removidas.`, mentions: [usuario] });
+}
+
+// ============ COMANDO LIMPAADV =======
+else if (/^limpaadv\b/i.test(msg.message?.conversation || msg.message?.extendedTextMessage?.text || '')) {
+    if (!isGroup) {
+        await sock.sendMessage(from, { text: '❌ Este comando só pode ser usado em grupos.' }, { quoted: msg });
+        return;
+    }
+    if (!isGroupAdmin) {
+        await sock.sendMessage(from, { text: '❌ Apenas administradores podem usar este comando.' }, { quoted: msg });
+        return;
+    }
+
+    try {
+        // Apaga conteúdo e recria vazio
+        fs.writeFileSync(advFile, '{}', 'utf8');
+        await sock.sendMessage(from, { text: 'Todas as advertências foram apagadas com sucesso.' }, { quoted: msg });
+    } catch (e) {
+        console.error("Erro ao limpar advertências:", e);
+        await sock.sendMessage(from, { text: '❌ Ocorreu um erro ao limpar as advertências.' }, { quoted: msg });
+    }
+}
+
+else if (isGroup && /^([#])?infocookie$/i.test(
+  msg.message?.conversation?.toLowerCase() ||
+  msg.message?.extendedTextMessage?.text?.toLowerCase() ||
+  msg.message?.imageMessage?.caption?.toLowerCase() || ''
+)) {
+  const info = `
+*🍪 COMO ATUALIZAR OS COOKIES DO YOUTUBE (RESTRITO)*
+
+✅ Siga esse passo a passo com atenção:
+
+1️⃣ Baixe o navegador *Yandex Browser*  
+📲 https://play.google.com/store/apps/details?id=com.yandex.browser
+
+2️⃣ Instale a extensão *"Get cookies.txt"*  
+🔗 https://chrome.google.com/webstore/detail/get-cookiestxt/hdnnchgbgpkjpjegnlcgdjkkpdldpbpo  
+Clique em *Adicionar ao Chrome*
+
+3️⃣ Acesse o site do *YouTube* no Yandex  
+🔐 Faça login com uma conta maior de idade  
+📼 Abra um vídeo com restrição e dê *play*
+
+4️⃣ Clique nos 3 pontinhos > Extensões > *Get cookies.txt*  
+Clique no botão *[Copiar]*
+
+5️⃣ Cole o conteúdo no arquivo:  
+📁 */SanizinhaBot/dados/cookies/youtube.com_cookies.txt*
+
+6️⃣ Reinicie o bot
+
+Pronto! Agora o bot vai conseguir baixar vídeos com restrição de idade pelo comando *play* ou *playvd*. 💿
+  `;
+  await sock.sendMessage(from, { text: info }, { quoted: msg });
+  return;
+}
+ 
+else if (isGroup && /^\.?(limparank|resetrank)$/i.test(
+  msg.message?.conversation?.toLowerCase() ||
+  msg.message?.extendedTextMessage?.text?.toLowerCase() ||
+  msg.message?.imageMessage?.caption?.toLowerCase() || ''
+)) {
+  if (!isGroupAdmin) {
+    await sock.sendMessage(from, { text: '❌ Apenas administradores podem usar este comando.' }, { quoted: msg });
+    return;
+  }
+  try {
+    carregarContador();
+    const sucesso = zerarContadorGrupo(from);
+    if (sucesso) {
+      salvarContador();
+      let nomeGrupo = from;
+      try {
+        const metadata = await sock.groupMetadata(from);
+        nomeGrupo = metadata.subject || from;
+      } catch {}
+      await sock.sendMessage(from, {
+        text: `*✅ RANK RESETADO COM SUCESSO NO GRUPO* ${nomeGrupo}`
+      }, { quoted: msg });
+
+    } else {
+      await sock.sendMessage(from, {
+        text: `❌ Nenhum contador encontrado para o grupo.`
+      }, { quoted: msg });
+    }
+  } catch (e) {
+    console.error('Erro ao limpar contador:', e);
+    await sock.sendMessage(from, {
+      text: '❌ Ocorreu um erro ao tentar limpar o contador.'
+    }, { quoted: msg });
+  }
+}
+
+else if (/^\.?(limparank2|resetrank2)$/i.test(
+  msg.message?.conversation?.toLowerCase() ||
+  msg.message?.extendedTextMessage?.text?.toLowerCase() ||
+  msg.message?.imageMessage?.caption?.toLowerCase() || ''
+)) {
+  const senderRaw = msg.key.participant || msg.key.remoteJid || sender || '';
+  const numeroSender = String(senderRaw).split('@')[0].replace(/\D/g, '');
+  const numeroDonoAtual = donoInfo?.numerodono?.replace(/\D/g, '');
+  const isDono = numeroSender === numeroDonoAtual;
+  const isBot = msg.key.fromMe === true;
+
+  if (!isDono && !isBot) {
+    await sock.sendMessage(from, {
+      text: '❌ Apenas o dono do bot ou o próprio bot pode usar este comando.'
+    }, { quoted: msg });
+    return;
+  }
+
+  try {
+    // Zera o objeto na RAM (se estiver em memória)
+    if (typeof contador === 'object') {
+      for (let chave in contador) {
+        delete contador[chave];
+      }
+    }
+
+    // Escreve {} no disco
+    fs.writeFileSync('./dados/contador.json', '{}');
+
+    await sock.sendMessage(from, {
+      text: '✅ Todos os dados do contador foram apagados com sucesso!'
+    }, { quoted: msg });
+  } catch (e) {
+    console.error('Erro ao apagar contador.json:', e);
+    await sock.sendMessage(from, {
+      text: '❌ Ocorreu um erro ao tentar limpar completamente o contador.'
+    }, { quoted: msg });
+  }
+}
+ 
+else if (isGroup && msgLower === 'prefixo') {
+  try {
+    const context = msg.message?.extendedTextMessage?.contextInfo;
+    let rawUser = sender;
+    if (Array.isArray(context?.mentionedJid) && context.mentionedJid.length > 0) {
+      rawUser = context.mentionedJid[0];
+    } else if (typeof context?.participant === 'string') {
+      rawUser = context.participant;
+    } else if (msg.key.participant) {
+      rawUser = msg.key.participant;
+    }
+    const user = typeof rawUser === 'string' ? rawUser : String(rawUser);
+    const userNumber = user.replace(/\D/g, '');
+    const userJid = `${userNumber}@s.whatsapp.net`;
+    const userTag = `@${userNumber}`;
+    const now = Date.now();
+    const frasesPrefixo = [
+      'porra de novo ja falei q nao uso isso garaio',
+      'pqp dinossauro do carai sai dessa da caverna',
+      'meu prefixo é: *manda menu, besta* 😹',
+      'quem usa prefixo ainda? Isso é tão 2020 😩',
+      'tô livre, leve e solta... sem prefixo 🌬️',
+      'prefixo? Só conheço o do DDD 🤡',
+      'o prefixo morreu, só você não sabe 😵',
+      'não tem prefixo não, é só mandar *menu* e ser feliz😸',
+      'se tivesse prefixo, seria “linda” 🫦✨',
+      'prefixo? nunca nem vi 😗',
+      'nao tem prefixo no meus sistemas🧜🏻‍♀️',
+      'prefixo é coisa do passado, assim como sua ex',
+      'meu pau no seu cuzinho e o prefixo 😂kkk',
+      'manda *menu* e para de graça 😂',
+      'prefixo? só se for o da minha beleza 💅'
+    ];
+    const fraseAleatoria = frasesPrefixo[Math.floor(Math.random() * frasesPrefixo.length)];
+    try {
+      await sock.sendMessage(from, { react: { text: '😹', key: msg.key } });
+    } catch {}
+    if (muteBotUsers.has(userJid)) return;
+    if (!spamBotMap.has(userJid)) spamBotMap.set(userJid, []);
+    const timestamps = spamBotMap.get(userJid).filter(ts => now - ts < 10000);
+    timestamps.push(now);
+    spamBotMap.set(userJid, timestamps);
+    if (timestamps.length >= 3) {
+      muteBotUsers.add(userJid);
+      setTimeout(() => muteBotUsers.delete(userJid), 10 * 60 * 1000);
+      await sock.sendMessage(from, {
+        text: 'o seu viado paraaaa😡fala cmg mais não',
+      }, { quoted: msg });
+      await sock.sendMessage(from, {
+        sticker: { url: './dados/figurinhas/flodprefixo.webp' }
+      }, { quoted: msg });
+    } else {
+      await sock.sendMessage(from, {
+        text: fraseAleatoria,
+        mentions: [userJid]
+      }, { quoted: msg });
+      await sock.sendMessage(from, {
+        sticker: { url: './dados/figurinhas/prefixo.webp' }
+      }, { quoted: msg });
+    }
+  } catch (e) {
+    console.error("Erro comando prefixo:", e);
+    await sock.sendMessage(from, {
+      text: "❌Erro no comando *prefixo*.",
+      mentions: [sender]
+    }, { quoted: msg });
+  }
+  return;
+}
+ 
+
+else if (isGroup && msgLower === 'totag') {
+    const grupoInfo = await sock.groupMetadata(from);
+    const participantes = grupoInfo.participants.map(p => p.id);
+
+    // Só ADM pode usar
+    const senderId = msg.key.participant || msg.key.remoteJid;
+    const isGroupAdmin = grupoInfo.participants.some(p => p.id === senderId && p.admin);
+    if (!isGroupAdmin) {
+        await sock.sendMessage(from, { text: "❌ Apenas administradores podem usar este comando." }, { quoted: msg });
+        return;
+    }
+
+    // Pega a mensagem respondida pelo ADM
+    const ctxInfo = msg.message?.extendedTextMessage?.contextInfo;
+    if (!ctxInfo?.quotedMessage) {
+        await sock.sendMessage(from, { text: "❌ Responda a uma mensagem para usar o totag." }, { quoted: msg });
+        return;
+    }
+
+    const quoted = ctxInfo.quotedMessage;
+
+    try {
+        let conteudo = {};
+
+        if (quoted.imageMessage) {
+            const buffer = await downloadContentFromMessage(quoted.imageMessage, 'image');
+            let imgBuffer = Buffer.from([]);
+            for await (const chunk of buffer) imgBuffer = Buffer.concat([imgBuffer, chunk]);
+
+            conteudo = {
+                image: imgBuffer,
+                caption: quoted.imageMessage.caption || '📢 @todos',
+                mentions: participantes
+            };
+        }
+        else if (quoted.videoMessage) {
+            const buffer = await downloadContentFromMessage(quoted.videoMessage, 'video');
+            let vidBuffer = Buffer.from([]);
+            for await (const chunk of buffer) vidBuffer = Buffer.concat([vidBuffer, chunk]);
+
+            conteudo = {
+                video: vidBuffer,
+                caption: quoted.videoMessage.caption || '📢 @todos',
+                mentions: participantes
+            };
+        }
+        else if (quoted.stickerMessage) {
+            const buffer = await downloadContentFromMessage(quoted.stickerMessage, 'sticker');
+            let stBuffer = Buffer.from([]);
+            for await (const chunk of buffer) stBuffer = Buffer.concat([stBuffer, chunk]);
+
+            conteudo = {
+                sticker: stBuffer,
+                mentions: participantes
+            };
+        }
+        else if (quoted.audioMessage) {
+            const buffer = await downloadContentFromMessage(quoted.audioMessage, 'audio');
+            let auBuffer = Buffer.from([]);
+            for await (const chunk of buffer) auBuffer = Buffer.concat([auBuffer, chunk]);
+
+            conteudo = {
+                audio: auBuffer,
+                mimetype: quoted.audioMessage.mimetype || 'audio/ogg; codecs=opus',
+                ptt: quoted.audioMessage.ptt || false,
+                mentions: participantes
+            };
+        }
+        else if (quoted.documentMessage) {
+            const buffer = await downloadContentFromMessage(quoted.documentMessage, 'document');
+            let docBuffer = Buffer.from([]);
+            for await (const chunk of buffer) docBuffer = Buffer.concat([docBuffer, chunk]);
+
+            conteudo = {
+                document: docBuffer,
+                mimetype: quoted.documentMessage.mimetype,
+                fileName: quoted.documentMessage.fileName || 'document',
+                mentions: participantes
+            };
+        }
+        else if (quoted.conversation) {
+            conteudo = {
+                text: quoted.conversation,
+                mentions: participantes
+            };
+        }
+        else if (quoted.extendedTextMessage?.text) {
+            conteudo = {
+                text: quoted.extendedTextMessage.text,
+                mentions: participantes
+            };
+        }
+        else {
+            conteudo = {
+                text: '📢 @todos',
+                mentions: participantes
+            };
+        }
+
+        await sock.sendMessage(from, conteudo);
+    } catch (err) {
+        console.error("Erro no totag:", err);
+        await sock.sendMessage(from, {
+            text: '📢 @todos',
+            mentions: participantes
+        });
+    }
+}
+// --------------- RANKS BRINCADEIRAS ZOEIRA --------------- //
+
+else if (isGroup && /\b(calvo|calva)\b/i.test(msgLower)) {
+  try {
+    if (sock.sendMessage && msg.key) {
+      await sock.sendMessage(from, {
+        react: {
+          text: '🤡',
+          key: msg.key
+        }
+      });
+    }
+    const { data } = await axios.get('https://files.catbox.moe/9omczf.mp3', {
+      responseType: 'arraybuffer'
+    });
+    const audioBuffer = Buffer.from(data, 'binary');
+    await sock.sendMessage(from, {
+      audio: audioBuffer,
+      mimetype: 'audio/mp4',
+      ptt: true
+    }, { quoted: msg });
+    const stickerBuffer = fs.readFileSync('./dados/figurinhas/calvo.webp');
+    await sock.sendMessage(from, {
+      sticker: stickerBuffer
+    }, { quoted: msg });
+  } catch (e) {
+    console.error("Erro no comando calvo", e);
+    await sock.sendMessage(from, {
+      text: 'TROPA DO CALVO NA PISTA🧑🏽‍🦲.'
+    }, { quoted: msg });
+  }
+}
+
+// ===== COMANDO PPK =====
+else if (
+  isGroup &&
+  (
+    /^ppk$/i.test(msgLower.trim()) ||
+    /^ppk\s+@\d+/i.test(msgLower.trim())   
+  )
+) {
+  try {
+    const contextInfo =
+      msg.message?.extendedTextMessage?.contextInfo ||
+      msg.message?.contextInfo || {};
+
+    const mencionado = Array.isArray(contextInfo.mentionedJid) && contextInfo.mentionedJid.length
+      ? contextInfo.mentionedJid[0]
+      : null;
+    const citado = contextInfo.participant || null;
+    const sender = msg.key?.participant || msg.participant || msg.key?.remoteJid || '';
+
+    let alvo = mencionado || citado || sender || '';
+    if (typeof alvo !== 'string') alvo = String(alvo || sender || '');
+    if (!alvo.includes('@')) {
+      alvo = `${alvo}@s.whatsapp.net`;
+    } else if (!alvo.endsWith('@s.whatsapp.net') && !alvo.endsWith('@c.us')) {
+      alvo = alvo.split('@')[0] + '@s.whatsapp.net';
+    }
+
+    if (!alvo || !alvo.includes('@')) {
+      return await sock.sendMessage(from, {
+        text: '❌ Não consegui identificar o alvo corretamente.',
+        quoted: msg
+      });
+    }
+
+    const numeroAlvo = alvo.split('@')[0];
+    const userTag = `@${numeroAlvo}`;
+
+    if (typeof reagir === 'function') {
+      setTimeout(() => reagir(from, "👀", msg), 300);
+    }
+
+    let msgMedindoPpk = await sock.sendMessage(from, {
+      text: `*Medindo a profundidade da ppk de* ${userTag} 🫸🫷🤔`,
+      mentions: [alvo]
+    }, { quoted: msg });
+
+    await sleep(1500);
+    await sock.sendMessage(from, {
+      edit: msgMedindoPpk.key,
+      text: `*Medindo a largura da ppk de* ${userTag} 🫸🫷🧐`,
+      mentions: [alvo]
+    });
+
+    await sleep(1500);
+    await sock.sendMessage(from, {
+      edit: msgMedindoPpk.key,
+      text: `*Espera aí que tô analisando🫦* ${userTag} 🫸 🫷 🤔`,
+      mentions: [alvo]
+    });
+
+    await sleep(1500);
+    const tamanhoPpk = Math.floor(Math.random() * 48) + 1;
+
+    const resultados = [
+      {
+        faixa: t => t <= 10,
+        legenda: t => `*Apertadinha demais...*\n⇒ ${userTag}\nProfundidade: ✮${t}cm✮\nCabe nem um cotonete 😂`,
+        imagem: "https://files.catbox.moe/cr3ujg.jpg"
+      },
+      {
+        faixa: t => t > 10 && t <= 30,
+        legenda: t => `*Tamanho perfeito...*\n⇒ ${userTag}\nProfundidade: ✮${t}cm✮\nIdeal pra maldade kkkkk 👀`,
+        imagem: "https://files.catbox.moe/17fxj6.jpg"
+      },
+      {
+        faixa: t => t > 30 && t < 45,
+        legenda: t => `*Eitaaaa!!*\n⇒ ${userTag}\nProfundidade: ✮${t}cm✮\nAbismo detectado 😂👁️👄👁️`,
+        imagem: "https://files.catbox.moe/e7ak3h.jpg"
+      },
+      {
+        faixa: t => t >= 45,
+        legenda: t => `*QUE ISSO CAVERNA??*\n⇒ ${userTag}\nProfundidade absurda: ✮${t}cm✮\nO famoso POCOTÓ 🐴`,
+        video: "https://files.catbox.moe/4cesyx.mp4"
+      }
+    ];
+
+    const resultado = resultados.find(r => r.faixa(tamanhoPpk));
+    const legendaPpk = resultado.legenda(tamanhoPpk);
+
+    if (resultado.video) {
+      await sock.sendMessage(from, {
+        video: { url: resultado.video },
+        caption: legendaPpk,
+        mentions: [alvo],
+        mimetype: 'video/mp4',
+        gifPlayback: true
+      }, { quoted: msg });
+    } else if (resultado.imagem) {
+      const imageBuffer = await axios.get(resultado.imagem, { responseType: 'arraybuffer' }).then(res => res.data);
+      await sock.sendMessage(from, {
+        image: imageBuffer,
+        caption: legendaPpk,
+        mentions: [alvo]
+      }, { quoted: msg });
+    } else {
+      await sock.sendMessage(from, {
+        text: legendaPpk,
+        mentions: [alvo]
+      }, { quoted: msg });
+    }
+  } catch (err) {
+    console.error('Erro no comando ppk:', err);
+    await sock.sendMessage(from, {
+      text: '❌ Ocorreu um erro ao processar o comando. Tenta de novo.',
+      quoted: msg
+    });
+  }
+}
+// ===== COMANDO GOSTOSO/GOSTOSA =====
+if (
+  isGroup &&
+  (
+    /^gostoso$/i.test(msgLower.trim()) ||
+    /^gostosa$/i.test(msgLower.trim()) ||
+    /^gostoso\s+@\d+/i.test(msgLower.trim()) ||
+    /^gostosa\s+@\d+/i.test(msgLower.trim())
+  )
+) {
+  try {
+    const contextInfo = msg.message?.extendedTextMessage?.contextInfo || msg.message?.contextInfo || {};
+    const mencionado = Array.isArray(contextInfo.mentionedJid) && contextInfo.mentionedJid.length
+      ? contextInfo.mentionedJid[0]
+      : null;
+    const citado = contextInfo.participant || null;
+    const sender = msg.key?.participant || msg.participant || msg.key?.remoteJid || '';
+
+    let alvo = mencionado || citado || sender || '';
+    if (!alvo.includes('@')) alvo = `${alvo}@s.whatsapp.net`;
+    else if (!alvo.endsWith('@s.whatsapp.net') && !alvo.endsWith('@c.us')) alvo = alvo.split('@')[0] + '@s.whatsapp.net';
+
+    // Pegar o nome do usuário
+    let nomeAlvo = "Você";
+    try {
+      const metadata = await sock.groupMetadata(from).catch(() => null);
+      if (metadata) {
+        const participante = metadata.participants.find(p => p.id === alvo);
+        if (participante) nomeAlvo = participante.pushName || nomeAlvo;
+      } else {
+        nomeAlvo = msg.pushName || nomeAlvo;
+      }
+    } catch {}
+
+    // Pegar foto de perfil
+    let fotoUrl = null;
+    try {
+      fotoUrl = await sock.profilePictureUrl(alvo, 'image');
+    } catch {
+      fotoUrl = 'https://i.imgur.com/rdm3W9t.png'; // foto padrão se não tiver
+    }
+
+    // Mensagem de suspense
+    await sock.sendMessage(from, { text: `🔎 Calculando a porcentagem de gostosura de ${nomeAlvo} 😏` }, { quoted: msg });
+    await sleep(2000);
+
+    // Porcentagem aleatória
+    const porcentagem = Math.floor(Math.random() * 101);
+
+    // Enviar resultado com foto de perfil
+    let bufferFoto = null;
+    try {
+      const res = await axios.get(fotoUrl, { responseType: 'arraybuffer' });
+      bufferFoto = res.data;
+    } catch {}
+
+    await sock.sendMessage(from, {
+      caption: `💖 ${nomeAlvo} é ${porcentagem}% gostos${porcentagem > 50 ? 'a' : 'o'} 😎`,
+      image: bufferFoto ? bufferFoto : undefined
+    }, { quoted: msg });
+
+  } catch (err) {
+    console.error('Erro no comando gostoso/gostosa:', err);
+    await sock.sendMessage(from, { text: '❌ Ocorreu um erro no comando gostoso/gostosa.' }, { quoted: msg });
+  }
+}
+
+
+
+// ===== COMANDO CHUTE =====
+if (
+  isGroup &&
+  (
+    /^chute$/i.test(msgLower.trim()) ||                // só "chute"
+    /^chute\s+@\d+/i.test(msgLower.trim())             // "chute @fulano"
+  )
+) {
+  try {
+    const contextInfo = msg.message?.extendedTextMessage?.contextInfo || msg.message?.contextInfo || {};
+    const mencionado = Array.isArray(contextInfo.mentionedJid) && contextInfo.mentionedJid.length
+      ? contextInfo.mentionedJid[0]
+      : null;
+    const citado = contextInfo.participant || null;
+    const sender = msg.key?.participant || msg.participant || msg.key?.remoteJid || '';
+
+    // Define o alvo
+    let alvo = mencionado || citado || sender || '';
+    if (!alvo.includes('@')) alvo = `${alvo}@s.whatsapp.net`;
+    else if (!alvo.endsWith('@s.whatsapp.net') && !alvo.endsWith('@c.us')) alvo = alvo.split('@')[0] + '@s.whatsapp.net';
+
+    // Nome do alvo
+    let nomeAlvo = "Você";
+    try {
+      const metadata = await sock.groupMetadata(from).catch(() => null);
+      if (metadata) {
+        const participante = metadata.participants.find(p => p.id === alvo);
+        if (participante) nomeAlvo = participante.pushName || nomeAlvo;
+      } else {
+        nomeAlvo = msg.pushName || nomeAlvo;
+      }
+    } catch {}
+
+    // Mensagem inicial de suspense
+    let msgSuspense = await sock.sendMessage(from, {
+      text: `👀 Preparando o chute em ${nomeAlvo}...`
+    }, { quoted: msg });
+
+    // Pausa e edição da mensagem de suspense
+    await sleep(1500);
+    await sock.sendMessage(from, {
+      edit: msgSuspense.key,
+      text: `💨 Quase lá, segurando firme...`
+    });
+
+    await sleep(1500);
+    await sock.sendMessage(from, {
+      edit: msgSuspense.key,
+      text: `🦶 CHUTANDO ${nomeAlvo}!`
+    });
+
+    await sleep(1500);
+
+    // Mensagem final
+    await sock.sendMessage(from, {
+      edit: msgSuspense.key,
+      text: `🏠 ${nomeAlvo} foi chutado pra casa do carrai!`
+    });
+
+    // Envia GIF do chute
+    const gifChute = "https://files.catbox.moe/ceydh9.mp4";
+    await sock.sendMessage(from, {
+      video: { url: gifChute },
+      gifPlayback: true,
+      caption: `😂 Olha o chute aí!`,
+    }, { quoted: msg });
+
+  } catch (err) {
+    console.error('Erro no comando chute:', err);
+    await sock.sendMessage(from, { text: '❌ Ocorreu um erro no comando chute.' }, { quoted: msg });
+  }
+}
+
+// ===== COMANDO CHANCES DE MATCH =====
+if (isGroup && /^chances/i.test(msgLower.trim())) {
+  try {
+    const ctx = msg.message?.extendedTextMessage?.contextInfo || msg.message?.contextInfo || {};
+    const mencionado = Array.isArray(ctx.mentionedJid) && ctx.mentionedJid.length
+      ? ctx.mentionedJid[0]
+      : null;
+
+    if (!mencionado) {
+      await sock.sendMessage(from, { text: "❌ Você deve mencionar alguém para calcular as chances de match!" }, { quoted: msg });
+      return;
+    }
+
+    const sender = msg.key.participant || msg.participant || msg.key.remoteJid;
+    const alvo = mencionado;
+
+    // 1️⃣ Mensagem temporária
+    const msgTemp = await sock.sendMessage(from, {
+      text: "⏳ Calculando chances de match...",
+      mentions: [sender, alvo]
+    }, { quoted: msg });
+
+    await sleep(2000);
+
+    // 2️⃣ Calcula porcentagem e frase
+    const chance = Math.floor(Math.random() * 101);
+    let frase;
+    if (chance <= 20) frase = "🤣 Nem cachorro encararia!";
+    else if (chance <= 40) frase = "😅 Pode ser um sapo com um gato da Disney… quem sabe!";
+    else if (chance <= 70) frase = "👀 Tem um clima aí!";
+    else if (chance <= 90) frase = "🔥 Química forte!";
+    else frase = "💘 Match perfeito!";
+
+    // 3️⃣ Apaga mensagem temporária
+    await sock.sendMessage(from, { delete: msgTemp.key });
+
+    // 4️⃣ Envia somente a foto com legenda (resultado)
+    const imgAlta = "https://files.catbox.moe/i47qky.gif";
+    const imgBaixa = "https://files.catbox.moe/3w0t6g.gif";
+    const foto = chance >= 50 ? imgAlta : imgBaixa;
+
+    const legenda =
+`💖 *Chances de Match* 💖
+
+@${sender.split("@")[0]}
+@${alvo.split("@")[0]}
+
+✨ Suas chances sao: *${chance}%*
+${frase}`;
+
+    await sock.sendMessage(from, {
+      image: { url: foto },
+      caption: legenda,
+      mentions: [sender, alvo]
+    }, { quoted: msg });
+
+  } catch (err) {
+    console.error("Erro no comando chances:", err);
+    await sock.sendMessage(from, {
+      text: "❌ Ocorreu um erro ao calcular as chances de match."
+    }, { quoted: msg });
+  }
+}
+// ===== COMANDO SENTAR COM SUSPENSE =====
+if (isGroup && /^sentar/i.test(msgLower.trim())) {
+  try {
+    const ctx = msg.message?.extendedTextMessage?.contextInfo || msg.message?.contextInfo || {};
+    const mencionado = Array.isArray(ctx.mentionedJid) && ctx.mentionedJid.length
+      ? ctx.mentionedJid[0]
+      : null;
+
+    if (!mencionado) {
+      await sock.sendMessage(from, { text: "❌ Você deve mencionar alguém para a zoeira!" }, { quoted: msg });
+      return;
+    }
+
+    const sender = msg.key.participant || msg.participant || msg.key.remoteJid;
+    const alvo = mencionado;
+
+    // 1️⃣ Mensagem inicial de suspense
+    let suspenseMsg = await sock.sendMessage(from, {
+      text: `💺 ${msg.pushName || "Você"} está se preparando para sentar em @${alvo.split("@")[0]}...`,
+      mentions: [alvo]
+    }, { quoted: msg });
+
+    await sleep(1500);
+
+    // 2️⃣ Mensagem de “segurando a sentada”
+    await sock.sendMessage(from, {
+      edit: suspenseMsg.key,
+      text: `😆 Quase lá... segurando firme em @${alvo.split("@")[0]}!`,
+      mentions: [alvo]
+    });
+
+    await sleep(1500);
+
+    // 3️⃣ Apaga a mensagem de suspense
+    await sock.sendMessage(from, {
+      delete: suspenseMsg.key
+    });
+
+    await sleep(500);
+
+    // 4️⃣ Envia a imagem com o resultado final
+    const imgResult = "https://files.catbox.moe/p7h30g.gif"; // GIF engraçado
+    await sock.sendMessage(from, {
+      image: { url: imgResult },
+      caption: `🤣 Olha só a zoeira! @${sender.split("@")[0]} sentou em @${alvo.split("@")[0]}!`,
+      mentions: [sender, alvo]
+    }, { quoted: msg });
+
+  } catch (err) {
+    console.error("Erro no comando sentar:", err);
+    await sock.sendMessage(from, {
+      text: "❌ Ocorreu um erro no comando sentar. Veja o console."
+    }, { quoted: msg });
+  }
+}
+
+// ===== COMANDO RANKMENDINGO =====
+if (isGroup && /^rankmendingo/i.test(msgLower.trim())) {
+  try {
+    const metadata = await sock.groupMetadata(from);
+    const participantes = metadata.participants.map(p => p.id);
+
+    // Embaralhar e pegar top 10
+    const shuffled = participantes.sort(() => 0.5 - Math.random());
+    const top10 = shuffled.slice(0, 10);
+
+    // Montar legenda com menções e porcentagens
+    let rankText = "😂 *Top 10 Mendingos do Grupo* 😂\n\n";
+    top10.forEach((p, i) => {
+      const nome = metadata.participants.find(u => u.id === p)?.pushName || `Membro ${i+1}`;
+      const chance = Math.floor(Math.random() * 101);
+      rankText += `#${i+1} - @${p.split("@")[0]} (${chance}%)\n`;
+    });
+
+    // Imagem online do rank
+    const imgRank = "https://files.catbox.moe/zfncbs.webp";
+
+    // Envia imagem com ranking top 10 e menciona
+    await sock.sendMessage(from, {
+      image: { url: imgRank },
+      caption: rankText,
+      mentions: top10
+    }, { quoted: msg });
+
+  } catch (err) {
+    console.error("Erro no comando rankmendingo:", err);
+    await sock.sendMessage(from, { text: "❌ Ocorreu um erro ao gerar o ranking mendigo." }, { quoted: msg });
+  }
+}
+
+// ===== COMANDO RANKNAZISTA (ZOeIRA) =====
+if (isGroup && /^ranknazista/i.test(msgLower.trim())) {
+  try {
+    const metadata = await sock.groupMetadata(from);
+    const participantes = metadata.participants.map(p => p.id);
+
+    // Embaralhar e pegar top 10
+    const shuffled = participantes.sort(() => 0.5 - Math.random());
+    const top10 = shuffled.slice(0, 10);
+
+    // Montar legenda com menções e porcentagens
+    let rankText = "🔥 Top 10 NAZISTAS 🔥\n\n";
+    top10.forEach((p, i) => {
+      const nome = metadata.participants.find(u => u.id === p)?.pushName || `Membro ${i+1}`;
+      const chance = Math.floor(Math.random() * 101);
+      rankText += `#${i+1} - @${p.split("@")[0]} (${chance}%)\n`;
+    });
+
+    // Foto online do rank
+    const imgRank = "https://files.catbox.moe/zfncbs.webp";
+
+    // Envia imagem com ranking top 10 e menciona
+    await sock.sendMessage(from, {
+      image: { url: imgRank },
+      caption: rankText,
+      mentions: top10
+    }, { quoted: msg });
+
+  } catch (err) {
+    console.error("Erro no comando ranknazista:", err);
+    await sock.sendMessage(from, { text: "❌ Ocorreu um erro ao gerar o ranknazista." }, { quoted: msg });
+  }
+}
+
+
+// ===== COMANDO FEIO/FEIA =====
+if (
+  isGroup &&
+  (
+    /^feio$/i.test(msgLower.trim()) ||
+    /^feia$/i.test(msgLower.trim()) ||
+    /^feio\s+@\d+/i.test(msgLower.trim()) ||
+    /^feia\s+@\d+/i.test(msgLower.trim())
+  )
+) {
+  try {
+    const contextInfo = msg.message?.extendedTextMessage?.contextInfo || msg.message?.contextInfo || {};
+    const mencionado = Array.isArray(contextInfo.mentionedJid) && contextInfo.mentionedJid.length
+      ? contextInfo.mentionedJid[0]
+      : null;
+    const citado = contextInfo.participant || null;
+    const sender = msg.key?.participant || msg.participant || msg.key?.remoteJid || '';
+
+    let alvo = mencionado || citado || sender || '';
+    if (!alvo.includes('@')) alvo = `${alvo}@s.whatsapp.net`;
+    else if (!alvo.endsWith('@s.whatsapp.net') && !alvo.endsWith('@c.us')) alvo = alvo.split('@')[0] + '@s.whatsapp.net';
+
+    // Nome do alvo
+    let nomeAlvo = "Você";
+    try {
+      const metadata = await sock.groupMetadata(from).catch(() => null);
+      if (metadata) {
+        const participante = metadata.participants.find(p => p.id === alvo);
+        if (participante) nomeAlvo = participante.pushName || nomeAlvo;
+      } else {
+        nomeAlvo = msg.pushName || nomeAlvo;
+      }
+    } catch {}
+
+    // Foto de perfil
+    let fotoUrl = null;
+    try {
+      fotoUrl = await sock.profilePictureUrl(alvo, 'image');
+    } catch {
+      fotoUrl = 'https://i.imgur.com/rdm3W9t.png'; // padrão se não tiver foto
+    }
+
+    // ===== Mensagem de suspense =====
+    let msgSuspense = await sock.sendMessage(from, {
+      text: `🔎 Calculando a feiura de ${nomeAlvo}... 😬`
+    }, { quoted: msg });
+
+    await sleep(1500);
+    await sock.sendMessage(from, {
+      edit: msgSuspense.key,
+      text: `⏳ Quase pronto...`
+    });
+
+    await sleep(1500);
+    await sock.sendMessage(from, {
+      edit: msgSuspense.key,
+      text: `😱 Só mais um segundo...`
+    });
+
+    await sleep(1500);
+    await sock.sendMessage(from, {
+      edit: msgSuspense.key,
+      text: `✅ Pronto!`
+    });
+
+    // ===== Calcula porcentagem aleatória =====
+    const porcentagem = Math.floor(Math.random() * 101);
+
+    // Faixas de resultado
+    const resultados = [
+      { faixa: t => t <= 25, legenda: t => `Kkkkk que dó\n⇒ ${nomeAlvo}\nFei${t > 50 ? 'a' : 'o'} ✮${t}%✮\nChama o cirurgião kkk` },
+      { faixa: t => t > 25 && t <= 50, legenda: t => `Hmmmm tá na média\n⇒ ${nomeAlvo}\nFei${t > 50 ? 'a' : 'o'} ✮${t}%✮\nNão é dos piores kkk` },
+      { faixa: t => t > 50 && t <= 75, legenda: t => `😳 Rapaz...\n⇒ ${nomeAlvo}\nFei${t > 50 ? 'a' : 'o'} ✮${t}%✮\nTá pesado hein` },
+      { faixa: t => t > 75, legenda: t => `💀 QUE MEDO!\n⇒ ${nomeAlvo}\nFei${t > 50 ? 'a' : 'o'} ✮${t}%✮\nSocorro kkk` },
+    ];
+
+    const resultadoFinal = resultados.find(r => r.faixa(porcentagem))?.legenda(porcentagem) || `Fei${porcentagem > 50 ? 'a' : 'o'} ✮${porcentagem}%✮`;
+
+    // Envia resultado com foto
+    let bufferFoto = null;
+    try {
+      const res = await axios.get(fotoUrl, { responseType: 'arraybuffer' });
+      bufferFoto = res.data;
+    } catch {}
+
+    await sock.sendMessage(from, {
+      caption: resultadoFinal,
+      image: bufferFoto ? bufferFoto : undefined
+    }, { quoted: msg });
+
+  } catch (err) {
+    console.error('Erro no comando feio/feia:', err);
+    await sock.sendMessage(from, { text: '❌ Ocorreu um erro no comando feio/feia.' }, { quoted: msg });
+  }
+}
+
+
+// ===== COMANDO LINDO/LINDA COM URL =====
+else if (
+  isGroup &&
+  (
+    /^lindo$/i.test(msgLower.trim()) || /^linda$/i.test(msgLower.trim()) ||   // só "lindo" ou "linda"
+    /^lindo\s+@\d+/i.test(msgLower.trim()) || /^linda\s+@\d+/i.test(msgLower.trim()) // com menção
+  )
+) {
+  try {
+    const contextInfo =
+      msg.message?.extendedTextMessage?.contextInfo ||
+      msg.message?.contextInfo || {};
+
+    const mencionado = Array.isArray(contextInfo.mentionedJid) && contextInfo.mentionedJid.length
+      ? contextInfo.mentionedJid[0]
+      : null;
+    const citado = contextInfo.participant || null;
+    const sender = msg.key?.participant || msg.participant || msg.key?.remoteJid || '';
+
+    // alvo = mencionado OU citado OU quem mandou a msg
+    let alvo = mencionado || citado || sender || '';
+    if (typeof alvo !== 'string') alvo = String(alvo || sender || '');
+    if (!alvo.includes('@')) {
+      alvo = `${alvo}@s.whatsapp.net`;
+    } else if (!alvo.endsWith('@s.whatsapp.net') && !alvo.endsWith('@c.us')) {
+      alvo = alvo.split('@')[0] + '@s.whatsapp.net';
+    }
+
+    if (!alvo || !alvo.includes('@')) {
+      return await sock.sendMessage(from, {
+        text: '❌ Não consegui identificar o alvo corretamente.',
+        quoted: msg
+      });
+    }
+
+    const numeroAlvo = alvo.split('@')[0];
+    const userTag = `@${numeroAlvo}`;
+
+    // reação
+    if (typeof reagir === 'function') {
+      setTimeout(() => reagir(from, "😍", msg), 300);
+    }
+
+    // suspense igual pau/ppk
+    let msgMedindo = await sock.sendMessage(from, {
+      text: `*Calculando o quão lindo(a) é* ${userTag} 😏`,
+      mentions: [alvo]
+    }, { quoted: msg });
+
+    await sleep(1500);
+    await sock.sendMessage(from, {
+      edit: msgMedindo.key,
+      text: `*Quase pronto...* ${userTag} 🫣`,
+      mentions: [alvo]
+    });
+
+    await sleep(1500);
+    await sock.sendMessage(from, {
+      edit: msgMedindo.key,
+      text: `*Só mais um segundo...* ${userTag} 😍`,
+      mentions: [alvo]
+    });
+
+    // porcentagem aleatória
+    const porcentagem = Math.floor(Math.random() * 100) + 1;
+
+    // define se é "linda" ou "lindo"
+    const genero = /^linda/i.test(msgLower.trim()) ? 'f' : 'm';
+
+    const frases = genero === 'f' ? [
+      "*Nem o espelho acredita 😬*",
+      "*Mamãe te ama... só ela mesmo 🥲*",
+      "*Um encanto... bem escondido 🦄*",
+      "*Filtro salva viu? 🤭*",
+      "*Só precisa de uma boa iluminação 💡*",
+      "*Linda até demais! 😍*",
+      "*Capa de revista 💄*",
+      "*Rouba olhares por onde passa 👀*",
+      "*Deusa grega? Com certeza! 🏛️*",
+      "*Beleza nível sobrenatural 😵‍❤️‍💋‍😵*"
+    ] : [
+      "*Nem espelho te reconhece 😬*",
+      "*Só a mãe acha bonito 🥲*",
+      "*Um charme… de outro planeta 🪐*",
+      "*Melhora com filtro 🤭*",
+      "*Um sorriso já ajuda 😁*",
+      "*Bonito até demais 😎*",
+      "*Carinha de novela 💅*",
+      "*Você para o trânsito 😍*",
+      "*Modelo? Com certeza! 📸*",
+      "*Perfeito demais, socorro! 😵‍💫*"
+    ];
+
+    const faixa = Math.floor((porcentagem - 1) / 10);
+    const fraseEscolhida = frases[faixa];
+
+    // URL das imagens
+    const imagemURL = genero === 'f'
+      ? 'https://files.catbox.moe/34r9ef.jpg'
+      : 'https://files.catbox.moe/54pm4j.jpg';
+
+    // busca imagem via axios
+    const imageBuffer = await axios.get(imagemURL, { responseType: 'arraybuffer' }).then(res => res.data);
+
+    const mensagem = `✨ ${userTag} é *${porcentagem}% ${genero === 'f' ? 'linda' : 'lindo'}!*\n${fraseEscolhida}`;
+
+    await sock.sendMessage(from, {
+      image: imageBuffer,
+      caption: mensagem,
+      mentions: [alvo]
+    }, { quoted: msg });
+
+  } catch (err) {
+    console.error('Erro no comando lindo/linda:', err);
+    await sock.sendMessage(from, {
+      text: '❌ Ocorreu um erro ao processar o comando. Tenta de novo.',
+      quoted: msg
+    });
+  }
+}
+
+else if (
+  isGroup &&
+  (
+    /^pau$/i.test(msgLower.trim()) ||                // só "pau"
+    /^pau\s+@\d+/i.test(msgLower.trim())             // "pau @fulano"
+  )
+) {
+  try {
+    const contextInfo =
+      msg.message?.extendedTextMessage?.contextInfo ||
+      msg.message?.contextInfo || {};
+
+    const mencionado = Array.isArray(contextInfo.mentionedJid) && contextInfo.mentionedJid.length
+      ? contextInfo.mentionedJid[0]
+      : null;
+    const citado = contextInfo.participant || null;
+    const sender = msg.key?.participant || msg.participant || msg.key?.remoteJid || '';
+
+    let alvo = mencionado || citado || sender || '';
+    if (typeof alvo !== 'string') alvo = String(alvo || sender || '');
+    if (!alvo.includes('@')) {
+      alvo = `${alvo}@s.whatsapp.net`;
+    } else if (!alvo.endsWith('@s.whatsapp.net') && !alvo.endsWith('@c.us')) {
+      alvo = alvo.split('@')[0] + '@s.whatsapp.net';
+    }
+
+    if (!alvo || !alvo.includes('@')) {
+      return await sock.sendMessage(from, {
+        text: '❌ Não consegui identificar o alvo corretamente.',
+        quoted: msg
+      });
+    }
+
+    const numeroAlvo = alvo.split('@')[0];
+    const userTag = `@${numeroAlvo}`;
+
+    if (typeof reagir === 'function') {
+      setTimeout(() => reagir(from, "😳", msg), 300);
+    }
+
+    let msgMedindoPau = await sock.sendMessage(from, {
+      text: `*Medindo o tamanho do pau de* ${userTag} 🫸🫷🤔`,
+      mentions: [alvo]
+    }, { quoted: msg });
+
+    await sleep(1500);
+    await sock.sendMessage(from, {
+      edit: msgMedindoPau.key,
+      text: `*Medindo a grossura do pau de* ${userTag} 🫸🫷🧐`,
+      mentions: [alvo]
+    });
+
+    await sleep(1500);
+    await sock.sendMessage(from, {
+      edit: msgMedindoPau.key,
+      text: `*Espera aí que tô medindo🫦* ${userTag} 🫸 🫷 🤔`,
+      mentions: [alvo]
+    });
+
+    await sleep(1500);
+    const tamanhopau = Math.floor(Math.random() * 30) + 1;
+
+    const resultados = [
+      {
+        faixa: t => t <= 5,
+        legenda: t => `*Kkkkk que dó*\n⇒ ${userTag}\nSeu pau mede só ✮${t}cm✮\nChama o urologista kkk`,
+        video: "https://files.catbox.moe/9eo8hd.mp4"
+      },
+      {
+        faixa: t => t > 5 && t <= 14,
+        legenda: t => `*Rapaz...*\n⇒ ${userTag}\nSeu pau tem ✮${t}cm✮\nTá na média hein`,
+        imagem: "https://files.catbox.moe/3snqji.jpg"
+      },
+      {
+        faixa: t => t > 14 && t <= 24,
+        legenda: t => `*Meu Deus do céu...*\n⇒ ${userTag}\nSeu pau tem ✮${t}cm✮\nDesumilde demais!!!`,
+        imagem: "https://i.postimg.cc/y6cVCDDL/20250706-151303.jpg"
+      },
+      {
+        faixa: t => t >= 25,
+        legenda: t => `*QUE ISSO MONSTRO??*\n⇒ ${userTag}\nSeu pau tem absurdos ✮${t}cm✮\nIsso nem é humano mais kkkk`,
+        imagem: "https://files.catbox.moe/7i4u1l.png"
+      }
+    ];
+
+    const resultado = resultados.find(r => r.faixa(tamanhopau));
+    const legendaPau = resultado.legenda(tamanhopau);
+
+    if (resultado.video) {
+      await sock.sendMessage(from, {
+        video: { url: resultado.video },
+        caption: legendaPau,
+        mentions: [alvo],
+        mimetype: 'video/mp4',
+        gifPlayback: true
+      }, { quoted: msg });
+    } else if (resultado.imagem) {
+      const imageBuffer = await axios.get(resultado.imagem, { responseType: 'arraybuffer' }).then(res => res.data);
+      await sock.sendMessage(from, {
+        image: imageBuffer,
+        caption: legendaPau,
+        mentions: [alvo]
+      }, { quoted: msg });
+    } else {
+      await sock.sendMessage(from, {
+        text: legendaPau,
+        mentions: [alvo]
+      }, { quoted: msg });
+    }
+  } catch (err) {
+    console.error('Erro no comando pau:', err);
+    await sock.sendMessage(from, {
+      text: '❌ Ocorreu um erro ao processar o comando. Tenta de novo.',
+      quoted: msg
+    });
+  }
+}
+
+// ===== COMANDO GAY =====
+else if (
+  isGroup &&
+  (
+    /^gay$/i.test(msgLower.trim()) ||             // só "gay"
+    /^gay\s+@\d+/i.test(msgLower.trim())         // "gay @fulano"
+  )
+) {
+  try {
+    const contextInfo =
+      msg.message?.extendedTextMessage?.contextInfo ||
+      msg.message?.contextInfo || {};
+
+    const mencionado = Array.isArray(contextInfo.mentionedJid) && contextInfo.mentionedJid.length
+      ? contextInfo.mentionedJid[0]
+      : null;
+    const citado = contextInfo.participant || null;
+    const sender = msg.key?.participant || msg.participant || msg.key?.remoteJid || '';
+
+    // alvo = mencionado OU citado OU quem mandou a msg
+    let alvo = mencionado || citado || sender || '';
+    if (typeof alvo !== 'string') alvo = String(alvo || sender || '');
+    if (!alvo.includes('@')) {
+      alvo = `${alvo}@s.whatsapp.net`;
+    } else if (!alvo.endsWith('@s.whatsapp.net') && !alvo.endsWith('@c.us')) {
+      alvo = alvo.split('@')[0] + '@s.whatsapp.net';
+    }
+
+    // não responde se alvo for o próprio bot
+    if (alvo === sock.user.id) return;
+
+    const numeroAlvo = alvo.split('@')[0];
+    const userTag = `@${numeroAlvo}`;
+
+    // reação
+    if (typeof reagir === 'function') {
+      setTimeout(() => reagir(from, "🌈", msg), 300);
+    }
+
+    // suspense inicial igual pau/ppk/lindo
+    let msgMedindo = await sock.sendMessage(from, {
+      text: `*Calculando o nível de gayzice de* ${userTag} 🌈`,
+      mentions: [alvo]
+    }, { quoted: msg });
+
+    await sleep(1500);
+    await sock.sendMessage(from, {
+      edit: msgMedindo.key,
+      text: `*Quase pronto...* ${userTag} 🫣`,
+      mentions: [alvo]
+    });
+
+    await sleep(1500);
+    await sock.sendMessage(from, {
+      edit: msgMedindo.key,
+      text: `*Só mais um segundo...* ${userTag} 😏`,
+      mentions: [alvo]
+    });
+
+    // porcentagem aleatória
+    const porcentagem = Math.floor(Math.random() * 200) + 1;
+
+    let frase = '';
+    if (porcentagem <= 10) frase = `😇 ${userTag} não é nem um pouco gay.`;
+    else if (porcentagem <= 20) frase = `🤏 ${userTag} tem um leve toque de gay.`;
+    else if (porcentagem <= 30) frase = `🫣 ${userTag} tá escondendo alguma coisa aí hein.`;
+    else if (porcentagem <= 40) frase = `👀 ${userTag} gosta de umas coisas diferentes...`;
+    else if (porcentagem <= 50) frase = `😏 ${userTag} já pensou em experimentar...`;
+    else if (porcentagem <= 60) frase = `🌈 ${userTag} tá no caminho certo...`;
+    else if (porcentagem <= 70) frase = `💅 ${userTag} pinta a unha escondido.`;
+    else if (porcentagem <= 80) frase = `🥵 ${userTag} só falta sair do armário.`;
+    else if (porcentagem <= 90) frase = `🔥 ${userTag} tá quase beijando o amiguinho.`;
+    else if (porcentagem <= 100) frase = `🏳️‍🌈 ${userTag} é gay com orgulho!`;
+    else if (porcentagem <= 120) frase = `💖 ${userTag} é ultra gay, sem freio.`;
+    else if (porcentagem <= 140) frase = `🛐 ${userTag} beija macho na voadora.`;
+    else if (porcentagem <= 160) frase = `🚨 ${userTag} tá na lista dos gays mais ativos do Brasil.`;
+    else if (porcentagem <= 180) frase = `💥 ${userTag} é tão gay que virou referência.`;
+    else frase = `👑 ${userTag} é o imperador supremo do arco-íris! 200% GAY kkkkkk`;
+
+    await sock.sendMessage(from, {
+      video: { url: 'https://files.catbox.moe/dsi783.mp4' },
+      caption: `${frase}\n\n*Porcentagem gay:* ${porcentagem}%`,
+      gifPlayback: true,
+      mentions: [alvo]
+    }, { quoted: msg });
+
+  } catch (err) {
+    console.error('Erro no comando gay:', err);
+    await sock.sendMessage(from, {
+      text: '❌ Ocorreu um erro ao processar o comando. Tenta de novo.',
+      quoted: msg
+    });
+  }
+}
+
+// ===== COMANDO CORNO =====
+else if (
+  isGroup &&
+  (
+    /^corno$/i.test(msgLower.trim()) ||            // só "corno"
+    /^corno\s+@\d+/i.test(msgLower.trim())        // "corno @fulano"
+  )
+) {
+  try {
+    const contextInfo =
+      msg.message?.extendedTextMessage?.contextInfo ||
+      msg.message?.contextInfo || {};
+
+    const mencionado = Array.isArray(contextInfo.mentionedJid) && contextInfo.mentionedJid.length
+      ? contextInfo.mentionedJid[0]
+      : null;
+    const citado = contextInfo.participant || null;
+    const sender = msg.key?.participant || msg.participant || msg.key?.remoteJid || '';
+
+    // alvo = mencionado OU citado OU quem mandou a msg
+    let alvo = mencionado || citado || sender || '';
+    if (typeof alvo !== 'string') alvo = String(alvo || sender || '');
+    if (!alvo.includes('@')) {
+      alvo = `${alvo}@s.whatsapp.net`;
+    } else if (!alvo.endsWith('@s.whatsapp.net') && !alvo.endsWith('@c.us')) {
+      alvo = alvo.split('@')[0] + '@s.whatsapp.net';
+    }
+
+    // não responde se alvo for o próprio bot
+    if (alvo === sock.user.id) return;
+
+    const numeroAlvo = alvo.split('@')[0];
+    const userTag = `@${numeroAlvo}`;
+
+    // reação
+    if (typeof reagir === 'function') {
+      setTimeout(() => reagir(from, "🐂", msg), 300);
+    }
+
+    // suspense inicial
+    let msgMedindo = await sock.sendMessage(from, {
+      text: `*Calculando o nível de corno de* ${userTag} 🐂`,
+      mentions: [alvo]
+    }, { quoted: msg });
+
+    await sleep(1500);
+    await sock.sendMessage(from, {
+      edit: msgMedindo.key,
+      text: `*Quase pronto...* ${userTag} 🤔`,
+      mentions: [alvo]
+    });
+
+    await sleep(1500);
+    await sock.sendMessage(from, {
+      edit: msgMedindo.key,
+      text: `*Só mais um segundo...* ${userTag} 😂`,
+      mentions: [alvo]
+    });
+
+    // porcentagem aleatória
+    const porcentagem = Math.floor(Math.random() * 101);
+    let frase = porcentagem === 0
+      ? `😇 ${userTag} não é corno! Porcentagem: 0% 🙏`
+      : `🤣 ${userTag} é ${porcentagem}% corno kkkkkkk`;
+
+    // envia vídeo direto via URL
+    await sock.sendMessage(from, {
+      video: { url: 'https://files.catbox.moe/md7drc.mp4' },
+      mimetype: 'video/mp4',
+      caption: frase,
+      mentions: [alvo],
+      gifPlayback: true
+    }, { quoted: msg });
+
+  } catch (err) {
+    console.error('Erro no comando corno:', err);
+    await sock.sendMessage(from, {
+      text: '❌ Ocorreu um erro ao processar o comando. Tenta de novo.',
+      quoted: msg
+    });
+  }
+}
+
+// ===== COMANDO SAFADA =====
+else if (
+  isGroup &&
+  (
+    /^safada$/i.test(msgLower.trim()) ||            // só "safada"
+    /^safada\s+@\d+/i.test(msgLower.trim())        // "safada @fulano"
+  )
+) {
+  try {
+    const contextInfo =
+      msg.message?.extendedTextMessage?.contextInfo ||
+      msg.message?.contextInfo || {};
+
+    const mencionado = Array.isArray(contextInfo.mentionedJid) && contextInfo.mentionedJid.length
+      ? contextInfo.mentionedJid[0]
+      : null;
+    const citado = contextInfo.participant || null;
+    const sender = msg.key?.participant || msg.participant || msg.key?.remoteJid || '';
+
+    // alvo = mencionado OU citado OU quem mandou a msg
+    let alvo = mencionado || citado || sender || '';
+    if (typeof alvo !== 'string') alvo = String(alvo || sender || '');
+    if (!alvo.includes('@')) {
+      alvo = `${alvo}@s.whatsapp.net`;
+    } else if (!alvo.endsWith('@s.whatsapp.net') && !alvo.endsWith('@c.us')) {
+      alvo = alvo.split('@')[0] + '@s.whatsapp.net';
+    }
+
+    // não responde se alvo for o próprio bot
+    if (alvo === sock.user.id) return;
+
+    const numeroAlvo = alvo.split('@')[0];
+    const userTag = `@${numeroAlvo}`;
+
+    // reação inicial
+    if (typeof reagir === 'function') {
+      setTimeout(() => reagir(from, "🔥", msg), 300);
+    }
+
+    // suspense inicial
+    let msgMedindo = await sock.sendMessage(from, {
+      text: `*Calculando o nível de safadeza de* ${userTag} 🔥`,
+      mentions: [alvo]
+    }, { quoted: msg });
+
+    await sleep(1500);
+    await sock.sendMessage(from, {
+      edit: msgMedindo.key,
+      text: `*Quase pronto...* ${userTag} 🤭`,
+      mentions: [alvo]
+    });
+
+    await sleep(1500);
+    await sock.sendMessage(from, {
+      edit: msgMedindo.key,
+      text: `*Só mais um segundo...* ${userTag} 😳`,
+      mentions: [alvo]
+    });
+
+    // porcentagem aleatória
+    const porcentagem = Math.floor(Math.random() * 100) + 1;
+
+    // define vídeo de acordo com a porcentagem
+    let videoUrl = '';
+    if (porcentagem <= 19) videoUrl = 'https://files.catbox.moe/5zq4f6.mp4';
+    else if (porcentagem <= 29) videoUrl = 'https://files.catbox.moe/kjkg3k.mp4';
+    else if (porcentagem <= 49) videoUrl = 'https://files.catbox.moe/4hqawv.mp4';
+    else if (porcentagem <= 59) videoUrl = 'https://files.catbox.moe/104he2.mp4';
+    else if (porcentagem <= 70) videoUrl = 'https://files.catbox.moe/hb4leh.mp4';
+    else videoUrl = 'https://files.catbox.moe/b3t11v.mp4';
+
+    // envia resultado final
+    await sock.sendMessage(from, {
+      video: { url: videoUrl },
+      caption: `🔞 O nível de *safadeza* de ${userTag} é de *${porcentagem}%*! 😳🔥`,
+      gifPlayback: true,
+      mentions: [alvo]
+    }, { quoted: msg });
+
+  } catch (err) {
+    console.error('Erro no comando safada:', err);
+    await sock.sendMessage(from, {
+      text: '❌ Ocorreu um erro ao processar o comando. Tenta de novo.',
+      quoted: msg
+    });
+  }
+}
+
+else if (msgLower === 'sorteio' && isGroup) {
+  if (global.sorteioAtivo?.[from]) {
+    await sock.sendMessage(from, { text: '⚠️ Um sorteio já está em andamento.' }, { quoted: msg });
+    return;
+  }
+  global.sorteioAtivo = global.sorteioAtivo || {};
+  global.sorteioParticipantes = global.sorteioParticipantes || {};
+  global.sorteioAtivo[from] = true;
+  global.sorteioParticipantes[from] = [];
+  const participantes = global.sorteioParticipantes[from];
+  const metadata = await sock.groupMetadata(from);
+  const groupMembers = metadata.participants;
+  const allJids = groupMembers.map(m => m.id);
+  const textoInicial = `🎉 *SORTEIO INICIADO!*\n\nMande "eu" no chat pra participar!\n⏳ Você tem *1 MINUTO* para entrar!`;
+  const msgSorteio = await sock.sendMessage(from, {
+    text: textoInicial,
+    mentions: allJids
+  }, { quoted: msg });
+  const listener = async (update) => {
+    if (!global.sorteioAtivo[from]) return;
+    if (update.type !== 'notify') return;
+    const messages = update.messages;
+    if (!messages || messages.length === 0) return;
+    const uMsg = messages[0];
+    if (!uMsg.message || !uMsg.key || !uMsg.key.remoteJid) return;
+    if (uMsg.key.remoteJid !== from) return;
+    let uText = '';
+    if (uMsg.message.conversation) uText = uMsg.message.conversation.toLowerCase();
+    else if (uMsg.message.extendedTextMessage?.text) 
+      uText = uMsg.message.extendedTextMessage.text.toLowerCase();
+    else return;
+    const uSender = uMsg.key.participant || uMsg.key.remoteJid;
+    if (uText === 'eu' && !participantes.includes(uSender)) {
+      participantes.push(uSender);
+      await sock.sendMessage(from, {
+        text: `✅ @${uSender.split('@')[0]} entrou no sorteio!`,
+        mentions: [uSender]
+      });
+    }
+  };
+  sock.ev.on('messages.upsert', listener);
+  setTimeout(async () => {
+    global.sorteioAtivo[from] = false;
+    sock.ev.off('messages.upsert', listener);
+    if (participantes.length === 0) {
+      await sock.sendMessage(from, { text: '❌ Ninguém participou do sorteio.' });
+      return;
+    }
+    let msgContagem = await sock.sendMessage(from, {
+      text: '⏳ Inscrições encerradas! Sorteio começa em 10 segundos...'
+    });
+    for (let i = 10; i >= 1; i--) {
+      await new Promise(r => setTimeout(r, 1000));
+      await sock.sendMessage(from, {
+        text: ` _Sorteando em:_ *${i}*...`,
+        edit: msgContagem.key
+      });
+    }
+    const sorteado = participantes[Math.floor(Math.random() * participantes.length)];
+    await sock.sendMessage(from, {
+      text: `🥳 PARABÉNS @${sorteado.split('@')[0]}!\n\n🎁 Você foi o *SORTEADO*!`,
+      mentions: [sorteado]
+    });
+    global.sorteioParticipantes[from] = [];
+  }, 60000);
+}
+
+else if (isGroup && ['namorar', 'terminar', 'dupla'].some(c => msgLower.startsWith(c))) {
+await sock.sendMessage(from, {
+    react: {
+      text: "💕",
+      key: msg.key
+    }
+  });
+  await handleNamorar(sock, msg, msgLower);
+}
+
+else if (isGroup && /^([#])?(beijo|beijar|bj)\b/i.test(msgLower)) {
+await sock.sendMessage(from, {
+    react: {
+      text: "❤️",
+      key: msg.key
+    }
+  });
+  const quotedParticipant = msg.message?.extendedTextMessage?.contextInfo?.participant || null;
+  const mentionedJid = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid || [];
+  const target = quotedParticipant ? quotedParticipant : (mentionedJid.length > 0 ? mentionedJid[0] : null);
+  const senderJid = typeof sender === 'string' ? sender : msg.key.participant || msg.participant || '';
+  const senderNumber = senderJid.replace(/[^0-9]/g, '');
+  const senderMention = `@${senderNumber}`;
+  let targetMention = null;
+  if (target) {
+    const targetNumber = target.replace(/[^0-9]/g, '');
+    targetMention = `@${targetNumber}`;
+  }
+  if (!targetMention) {
+    await sock.sendMessage(from, {
+      text: '😗 Marque ou responda alguém que você quer beijar.',
+    }, { quoted: msg });
+    return;
+  }
+  const texto = `💋🌹 ${senderMention} tascou um beijo cinematográfico em ${targetMention}! A paixão está no ar! ❤️‍🔥💕👁️🫦👁️`;
+  const videos = [
+    'https://files.catbox.moe/wyrrby.mp4',
+    'https://files.catbox.moe/b79cpy.mp4'
+  ];
+  const randomVideo = videos[Math.floor(Math.random() * videos.length)];
+  try {
+    await sock.sendMessage(from, {
+      video: { url: randomVideo },
+      caption: texto,
+      gifPlayback: true,
+      mentions: [senderJid, target],
+    }, { quoted: msg });
+    await sock.sendMessage(from, {
+  audio: { url: 'https://files.catbox.moe/ayghjg.mp3' },
+  mimetype: 'audio/mp4',
+  ptt: true
+}, { quoted: msg });
+  } catch (e) {
+    console.error("Erro no comando beijo:", e);
+    await sock.sendMessage(from, {
+      text: '❌ Ocorreu um erro ao tentar enviar o beijo.'
+    }, { quoted: msg });
+  }
+}
+
+else if (isGroup && /^tapa\b/i.test(msgLower)) {
+  const quotedParticipant = msg.message?.extendedTextMessage?.contextInfo?.participant || null;
+  const mentionedJid = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid || [];
+  const groupMetadata = isGroup ? await sock.groupMetadata(from) : {};
+  const participantes = groupMetadata?.participants || [];
+  const target = quotedParticipant || (mentionedJid.length > 0 ? mentionedJid[0] : sender);
+  const userTag = `@${target.split('@')[0]}`;
+  await sock.sendMessage(from, {
+    react: {
+      text: "🍑",
+      key: msg.key
+    }
+  });
+  const tapaUrls = {
+    1: 'https://files.catbox.moe/0ecjnw.mp4',
+    2: 'https://files.catbox.moe/0oyb7a.mp4',
+    3: 'https://files.catbox.moe/0oyb7a.mp4',
+    4: 'https://files.catbox.moe/k8c00z.mp4',
+    5: 'https://files.catbox.moe/bxbefq.mp4',
+    6: 'https://files.catbox.moe/84llaw.mp4',
+    7: 'https://files.catbox.moe/oiqia5.mp4',
+    8: 'https://files.catbox.moe/vxbktv.mp4'
+  };
+  const rand = Math.floor(Math.random() * 8) + 1;
+  const videoUrl = tapaUrls[rand];
+  let caption = `👋 *${userTag}, você levou um tapa!*`;
+  let mentions = [target];
+  if (rand === 4 && participantes.length > 2) {
+    const outros = participantes
+      .filter(p => p.id !== target && p.id !== sender);
+    if (outros.length > 0) {
+      const aleatorio = outros[Math.floor(Math.random() * outros.length)];
+      const erroTag = `@${aleatorio.id.split('@')[0]}`;
+      caption = `😅 Vix... tentou dar um tapa em ${userTag}, mas acabou acertando ${erroTag} sem querer kkk`;
+      mentions = [target, aleatorio.id];
+    }
+  }
+  await sock.sendMessage(from, {
+    video: { url: videoUrl },
+    caption,
+    gifPlayback: true,
+    mentions
+  }, { quoted: msg });
+}
+
+else if (isGroup && /^([#])?(lavarlouça|lavarlouca)\b/i.test(msgLower)) {
+  try {
+    const quotedParticipant = msg.message?.extendedTextMessage?.contextInfo?.participant || null;
+    const mentionedJid = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid || [];
+    const target = quotedParticipant ? quotedParticipant : (mentionedJid.length > 0 ? mentionedJid[0] : null);
+
+    const senderJid = typeof sender === 'string' ? sender : msg.key.participant || msg.participant || '';
+    const senderNumber = senderJid.replace(/[^0-9]/g, '');
+    const senderMention = `@${senderNumber}`;
+
+    let targetMention = null;
+    let targetNumber = null;
+    if (target) {
+      targetNumber = target.replace(/[^0-9]/g, '');
+      targetMention = `@${targetNumber}`;
+    }
+
+    if (!targetMention) {
+      await sock.sendMessage(from, {
+        text: '🍽️ Marque ou responda alguém para lavar a louça!',
+      }, { quoted: msg });
+      return;
+    }
+
+    await sock.sendMessage(from, {
+      react: { text: "🧽", key: msg.key }
+    });
+
+    const frases = [
+      'Não adianta correr, a pia te espera! 😂',
+      'Coragem, campeão... a louça não se lava sozinha! 🍽️',
+      'Mais sujo que essa louça só suas desculpas! 🫧',
+      'Lava aí rapidinho e volta pro grupo! 💦',
+      'A louça não vai se lavar sozinha, amigão! 🧼',
+      'Missão dada é missão cumprida! 🧽',
+      'Vai lá mostrar que sabe esfregar um prato! 🍛',
+      'Seu nome foi sorteado pra lavar hoje! 🎯',
+      'O grupo inteiro agradece seu esforço na pia! 🙌'
+    ];
+
+    const fraseAleatoria = frases[Math.floor(Math.random() * frases.length)];
+    const texto = `🧼🍽️ ${senderMention} mandou ${targetMention} lavar a louça!\n${fraseAleatoria}`;
+
+    const videoBuffer = await axios.get('https://files.catbox.moe/879o7q.mp4', {
+  responseType: 'arraybuffer'
+}).then(res => res.data);
+    await sock.sendMessage(from, {
+      video: videoBuffer,
+      caption: texto,
+      gifPlayback: true,
+      mentions: [senderJid, target]
+    }, { quoted: msg });
+  } catch (err) {
+    console.error('Erro no comando tapa:', err);
+    await sock.sendMessage(from, {
+      text: '❌ Ocorreu um erro ao tentar enviar o vídeo.'
+    }, { quoted: msg });
+  }
+}
+
+else if (isGroup && /^([#])?tapao\b/i.test(msgLower)) {
+  const quotedParticipant = msg.message?.extendedTextMessage?.contextInfo?.participant || null;
+  const mentionedJid = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid || [];
+  const target = quotedParticipant ? quotedParticipant : (mentionedJid.length > 0 ? mentionedJid[0] : null);
+
+  const senderJid = typeof sender === 'string' ? sender : msg.key.participant || msg.participant || '';
+  const senderNumber = senderJid.replace(/[^0-9]/g, '');
+  const senderMention = `@${senderNumber}`;
+
+  if (!target) {
+    await sock.sendMessage(from, {
+      text: '🖐️ Marque alguém pra levar um tapão!',
+    }, { quoted: msg });
+    return;
+  }
+
+  const targetNumber = target.replace(/[^0-9]/g, '');
+  const targetMention = `@${targetNumber}`;
+
+  await sock.sendMessage(from, {
+    react: { text: "🍑", key: msg.key }
+  });
+
+  const frases = [
+    'Tomou um tapão que até girou! 😂',
+    'Isso aqui foi pra aprender a não falar besteira! 🫢',
+    'Plááá! Ouvi daqui! 😂',
+    'Agora acorda, que esse tapa foi de realidade! 💢',
+    'Quem mandou vacilar? Tapão neles! 💥',
+    'Foi de mão aberta, sem dó nem piedade! 😤',
+    'A bochecha tá até vermelha agora! 😳',
+    'Avisa quando quiser outro! 👋',
+    'Reage aí depois dessa! 🔥'
+  ];
+  const fraseAleatoria = frases[Math.floor(Math.random() * frases.length)];
+  const texto = `💢🔥 ${senderMention} *deu um tapão em* ${targetMention}!\n${fraseAleatoria}`;
+
+  try {
+const videoBuffer = await axios.get('https://files.catbox.moe/sqkk59.mp4', {
+  responseType: 'arraybuffer'
+}).then(res => res.data);
+    await sock.sendMessage(from, {
+      video: videoBuffer,
+      caption: texto,
+      gifPlayback: true,
+      mentions: [senderJid, target]
+    }, { quoted: msg });
+  } catch (err) {
+    console.error('Erro no comando tapa:', err);
+    await sock.sendMessage(from, {
+      text: '❌ Ocorreu um erro ao tentar enviar o vídeo.'
+    }, { quoted: msg });
+  }
+}
+
+else if (isGroup && /^([#])?(matar|mata)\b/i.test(msgLower)) {
+  await sock.sendMessage(from, { react: { text: "🤺", key: msg.key } });
+
+  const quotedParticipant = msg.message?.extendedTextMessage?.contextInfo?.participant || null;
+  const mentionedJid = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid || [];
+  const target = quotedParticipant ? quotedParticipant : (mentionedJid.length > 0 ? mentionedJid[0] : null);
+
+  const senderJid = typeof sender === 'string' ? sender : msg.key.participant || msg.participant || '';
+  const senderNumber = senderJid.replace(/[^0-9]/g, '');
+  const senderMention = `@${senderNumber}`;
+
+  let targetMention = null;
+  if (target) {
+    const targetNumber = target.replace(/[^0-9]/g, '');
+    targetMention = `@${targetNumber}`;
+  }
+
+  const texto = targetMention
+    ? `🔪⚔️ ${senderMention} 𝐞𝐥𝐢𝐦𝐢𝐧𝐨𝐮 𝐟𝐫𝐢𝐚𝐦𝐞𝐧𝐭𝐞 ${targetMention}! ☠️`
+    : `⚔️ ${senderMention} tentou matar o ar... mas não acertou ninguém! 😂`;
+
+  const links = [
+    'https://files.catbox.moe/df1teu.mp4',
+    'https://files.catbox.moe/ctzmqg.mp4',
+    'https://files.catbox.moe/cgeqqw.mp4',
+    'https://files.catbox.moe/iyyo7m.mp4',
+    'https://files.catbox.moe/0r5aty.mp4'
+  ];
+  const linkAleatorio = links[Math.floor(Math.random() * links.length)];
+
+  try {
+    await sock.sendMessage(from, {
+      video: { url: linkAleatorio },
+      caption: texto,
+      gifPlayback: true,
+      mentions: target ? [senderJid, target] : [senderJid],
+    }, { quoted: msg });
+  } catch (e) {
+    console.error("Erro no comando matar:", e);
+    await sock.sendMessage(from, {
+      text: '❌ Ocorreu um erro ao tentar executar o comando matar.'
+    }, { quoted: msg });
+  }
+}
+
+else if (isGroup && msgLower === 'rankgay') {
+   try {
+    const groupMetadata = await getGroupMetadataCached(from, sock);
+    const participantes = groupMetadata.participants.filter(p => !p.id.includes('g.us'));
+ try {
+    await sock.sendMessage(from, { react: { text: '🙇🏻‍♀️', key: msg.key } });
+  } catch {}
+    if (participantes.length < 5) {
+      await sock.sendMessage(from, { text: '❌ O grupo precisa ter pelo menos 5 membros para gerar o rank gay.' }, { quoted: msg });
+      return;
+    }
+    const sorteados = participantes
+      .sort(() => Math.random() - 0.5)
+      .slice(0, 5);
+    const frasesZoeira = (porc) => {
+      if (porc >= 90) return '🌈 Esse aqui já tá marchando na Parada Gay com glitter na cara e cropped da Barbie!';
+      if (porc >= 75) return '💅 Vive de shortinho curto ouvindo Pabllo Vittar no talo.';
+      if (porc >= 50) return '😏 Já deu uma rebolada pro amigo e gostou.';
+      if (porc >= 25) return '🤨 Fala que é hétero, mas assiste BBB com crush no Fred.';
+      return '🧢 Esse jura que é hétero, mas passa pano pra cada macho feio...';
+    };
+    let texto = '🏳️‍🌈 *RANKING GAY OFICIAL DO GRUPO* 🏳️‍🌈\n';
+    texto += '───────────────\n';
+    const mentions = [];
+    for (const p of sorteados) {
+      const porc = Math.floor(Math.random() * 100) + 1;
+      const tag = `@${p.id.split('@')[0]}`;
+      mentions.push(p.id);
+      texto += `👤 ${tag} — *${porc}% GAY*\n_${frasesZoeira(porc)}_\n\n`;
+    }
+        await sock.sendMessage(from, {
+      video: { url: 'https://files.catbox.moe/dsi783.mp4' },
+      caption: texto.trim(),
+      gifPlayback: true,
+      mentions
+    }, { quoted: msg });
+  } catch (e) {
+    console.error('Erro no comando rankgay:', e);
+    await sock.sendMessage(from, {
+      text: '❌ Erro ao gerar o rank gay.',
+    }, { quoted: msg });
+  }
+}
+ 
+else if (isGroup && (msgLower === 'rankppk' || msgLower === 'rankbuceta')) {
+  try {
+    const groupMetadata = await getGroupMetadataCached(from, sock);
+    const participantes = groupMetadata.participants.filter(p => !p.id.includes('g.us'));
+try {
+    await sock.sendMessage(from, { react: { text: '💕', key: msg.key } });
+  } catch {} 
+    if (participantes.length < 5) {
+      await sock.sendMessage(from, { text: '❌ O grupo precisa de pelo menos 5 membros para o ranking da buceta.' }, { quoted: msg });
+      return;
+    }
+    const sorteados = participantes.sort(() => Math.random() - 0.5).slice(0, 5);
+    const frasesPpk = (tam) => {
+      if (tam <= 5) return '🧃 Entrou só a pontinha e já reclamou de dor 😬';
+      if (tam <= 10) return '🔒 Apertadinha... só entra se pedir licença primeiro!';
+      if (tam <= 15) return '👅 Cabe o bot, o admin e ainda sobra espaço pra um milkshake';
+      if (tam <= 20) return '🌪️ Já virou parque de diversão do bairro';
+      if (tam <= 30) return '🚨 Qualquer coisa que entra ali precisa de resgate';
+      return '🐘 Isso aí é o *multiverso da buceta*! Já moram 3 famílias ali dentro';
+    };
+    let texto = '💦 *TOP 5 PPKAS DO GRUPO😂* 💦\n';
+    texto += '━━━━━━━━━━━━━━━━━━━━━\n';
+    const mentions = [];
+    for (const p of sorteados) {
+      const tamanho = Math.floor(Math.random() * 35) + 1;
+      const tag = `@${p.id.split('@')[0]}`;
+      mentions.push(p.id);
+      texto += `💋 ${tag} — *${tamanho}cm de PPK*\n_${frasesPpk(tamanho)}_\n\n`;
+    }
+    await sock.sendMessage(from, {
+      video: { url: 'https://files.catbox.moe/1w727h.mp4' },
+      caption: texto.trim(),
+      gifPlayback: true,
+      mentions
+    }, { quoted: msg });
+  } catch (e) {
+    console.error('Erro no comando rankPpk:', e);
+    await sock.sendMessage(from, {
+      text: '❌ Deu erro ao montar o ranking bucetudo.',
+    }, { quoted: msg });
+  }
+}
+
+else if (isGroup && (msgLower === 'rankpau' || msgLower === 'pau')) {
+  try {
+    const groupMetadata = await getGroupMetadataCached(from, sock);
+    const participantes = groupMetadata.participants.filter(p => !p.id.includes('g.us'));
+try {
+    await sock.sendMessage(from, { react: { text: '🪵', key: msg.key } });
+  } catch {}
+    
+    if (participantes.length < 5) {
+      await sock.sendMessage(from, { text: '❌ O grupo precisa de pelo menos 5 membros para o ranking do PAU.' }, { quoted: msg });
+      return;
+    }
+    const sorteados = participantes.sort(() => Math.random() - 0.5).slice(0, 5);
+    const frasesPau = (tam) => {
+      if (tam <= 8) return '🔌 Versão USB... só conecta se for com carinho';
+      if (tam <= 14) return '🍌 Clássico nacional, padrão médio';
+      if (tam <= 20) return '🚀 Pau fogueteiro, já foi até pra NASA';
+      if (tam <= 30) return '🪓 Esse aí tem CPF próprio e paga imposto';
+      if (tam <= 40) return 'Famoso espanca úteros😂';
+      return '🐲 O dragão acordou, se esconde que é tsunami';
+    };
+    let texto = '🍆 *TOP 5 PAUZUDOS DO GRUPO* 🍆\n';
+    texto += '━━━━━━━━━━━━━━━━━━━━━━━\n';
+    const mentions = [];
+    for (const p of sorteados) {
+      const tamanho = Math.floor(Math.random() * 48) + 1;
+      const tag = `@${p.id.split('@')[0]}`;
+      mentions.push(p.id);
+      texto += `🍌 ${tag} — *${tamanho}cm de PAU*\n_${frasesPau(tamanho)}_\n\n`;
+    }
+    await sock.sendMessage(from, {
+      video: { url: 'https://files.catbox.moe/zoiq09.mp4' },
+      caption: texto.trim(),
+      gifPlayback: true,
+      mentions
+    }, { quoted: msg });
+  } catch (e) {
+    console.error('Erro no comando rankpau:', e);
+    await sock.sendMessage(from, {
+      text: '❌ Deu erro ao montar o ranking paududo.',
+    }, { quoted: msg });
+  }
+}
+
+else if (isGroup && (msgLower === 'rankputa' || msgLower === 'puta')) {
+  try {
+    const groupMetadata = await getGroupMetadataCached(from, sock);
+    const participantes = groupMetadata.participants.filter(p => !p.id.includes('g.us'));
+try {
+    await sock.sendMessage(from, { react: { text: '💅🏻', key: msg.key } });
+  } catch {}    
+    if (participantes.length < 5) {
+      await sock.sendMessage(from, { text: '❌ O grupo precisa de pelo menos 5 membros para o ranking da putaria.' }, { quoted: msg });
+      return;
+    }
+    const sorteados = participantes.sort(() => Math.random() - 0.5).slice(0, 5);
+    const frasePutaria = (p) => {
+      if (p <= 20) return '🚫 Ainda assiste desenho da Barbie';
+      if (p <= 40) return '😇 Só manda nude por engano (ou será que não?)';
+      if (p <= 60) return '🔥 Já caiu na tentação algumas vezes...';
+      if (p <= 80) return '👅 Boca de 09h às 18h e xereca de plantão';
+      if (p < 100) return '🍑 P*ta licenciada pelo MEC';
+      return '👑 Rainha da putaria. Tem mais currículo que atriz pornô';
+    };
+    let texto = '💋 *TOP 5 MAIS PUTAS DO GRUPO* 💋\n';
+    texto += '━━━━━━━━━━━━━━━━━━━━━━━\n';
+    const mentions = [];
+    for (const p of sorteados) {
+      const porcentagem = Math.floor(Math.random() * 100) + 1;
+      const tag = `@${p.id.split('@')[0]}`;
+      mentions.push(p.id);
+      texto += `💄 ${tag} — *${porcentagem}% puta*\n_${frasePutaria(porcentagem)}_\n\n`;
+    }
+    await sock.sendMessage(from, {
+  video: { url: 'https://files.catbox.moe/87upof.mp4' },
+  gifPlayback: true,
+  caption: texto.trim(),
+  mentions
+}, { quoted: msg });
+
+  } catch (e) {
+    console.error('Erro no comando rankputa:', e);
+    await sock.sendMessage(from, {
+      text: '❌ Erro ao gerar o ranking das putas.',
+    }, { quoted: msg });
+  }
+}
+
+else if (isGroup && (msgLower === 'rankclt' || msgLower === 'clt')) {
+  try {
+    const groupMetadata = await getGroupMetadataCached(from, sock);
+    const participantes = groupMetadata.participants.filter(p => !p.id.includes('g.us'));
+try {
+    await sock.sendMessage(from, { react: { text: '👷🏻‍♀️', key: msg.key } });
+  } catch {}
+    if (participantes.length < 5) {
+      await sock.sendMessage(from, { text: '❌ O grupo precisa de pelo menos 5 membros para o ranking CLT.' }, { quoted: msg });
+      return;
+    }
+    const sorteados = participantes.sort(() => Math.random() - 0.5).slice(0, 5);
+    const fraseCLT = (p) => {
+      if (p <= 20) return '😎 Trabalha por aplicativo e vive pedindo Pix';
+      if (p <= 40) return '🚨 Já foi demitido por "redução de custos" 3 vezes';
+      if (p <= 60) return '📎 Tem crachá mas o salário mal paga o aluguel';
+      if (p <= 80) return '☕ Vive de café e reunião que podia ser um e-mail';
+      if (p < 100) return '🪙 Passa mais tempo no RH do que na própria casa kkkk';
+      return '👔 CLT raiz: sonha com férias, acorda com despertador e vive pelo 13º';
+    };
+    let texto = '🗃️ *TOP 5 MAIS CLT DO GRUPO* 🗃️\n';
+    texto += '━━━━━━━━━━━━━━━━━━━━━━━\n';
+    const mentions = [];
+    for (const p of sorteados) {
+      const porcentagem = Math.floor(Math.random() * 100) + 1;
+      const tag = `@${p.id.split('@')[0]}`;
+      mentions.push(p.id);
+      texto += `🧾 ${tag} — *${porcentagem}% CLT*\n_${fraseCLT(porcentagem)}_\n\n`;
+    }
+await sock.sendMessage(from, {
+  video: { url: 'https://files.catbox.moe/241uqa.mp4' },
+  gifPlayback: true,
+  caption: texto.trim(),
+  mentions
+}, { quoted: msg });
+  } catch (e) {
+    console.error('Erro no comando rankclt:', e);
+    await sock.sendMessage(from, {
+      text: '❌ Erro ao gerar o ranking CLT.',
+    }, { quoted: msg });
+  }
+}
+ 
+else if (isGroup && msgLower === 'rankcorno') {
+  try {
+    const groupMetadata = await getGroupMetadataCached(from, sock);
+    const participantes = groupMetadata.participants.filter(p => !p.id.includes('g.us'));
+try {
+    await sock.sendMessage(from, { react: { text: '🐂', key: msg.key } });
+  } catch {}
+    if (participantes.length < 5) {
+      await sock.sendMessage(from, { text: '❌ O grupo precisa ter pelo menos 5 membros para gerar o rank corno.' }, { quoted: msg });
+      return;
+    }
+    const sorteados = participantes
+      .sort(() => Math.random() - 0.5)
+      .slice(0, 5);
+    const frasesCornudo = (porc) => {
+      if (porc >= 90) return '🫠 Já tá criando chifre em casa e chamando de antena 5G.';
+      if (porc >= 75) return '😭 Sabe que é corno e ainda paga o iFood pro Ricardão.';
+      if (porc >= 50) return '😢 Leva chifre e ainda pede desculpa.';
+      if (porc >= 25) return '🧐 Ouvinte fiel do Pablo do Arrocha... sinal de alerta!';
+      return '😎 Até agora tá ileso... mas o Ricardão já mandou solicitação no Insta.';
+    };
+    let texto = '🐮 *RANKING CORNO OFICIAL DO GRUPO* 🐮\n';
+    texto += '───────────────\n';
+    const mentions = [];
+    for (const p of sorteados) {
+      const porc = Math.floor(Math.random() * 100) + 1;
+      const tag = `@${p.id.split('@')[0]}`;
+      mentions.push(p.id);
+      texto += `👤 ${tag} — *${porc}% CORNO*\n_${frasesCornudo(porc)}_\n\n`;
+    }
+await sock.sendMessage(from, {
+  video: { url: 'https://files.catbox.moe/md7drc.mp4' },
+  gifPlayback: true,
+  caption: texto.trim(),
+  mentions
+}, { quoted: msg });
+  } catch (e) {
+    console.error('Erro no comando rankcorno:', e);
+    await sock.sendMessage(from, {
+      text: '❌ Erro ao gerar o rank corno.',
+    }, { quoted: msg });
+  }
+}
+
+else if (isGroup && (msgLower === 'rankgado' || msgLower === 'rankgados')) {
+  try {
+    const groupMetadata = await getGroupMetadataCached(from, sock);
+    const participantes = groupMetadata.participants.filter(p => !p.id.includes('g.us'));
+try {
+    await sock.sendMessage(from, { react: { text: '🐮', key: msg.key } });
+  } catch {}
+    if (participantes.length < 5) {
+      await sock.sendMessage(from, { text: '❌ O grupo precisa ter pelo menos 5 membros para gerar o rank gado.' }, { quoted: msg });
+      return;
+    }
+    const sorteados = participantes
+      .sort(() => Math.random() - 0.5)
+      .slice(0, 5);
+    const frasesGado = (porc) => {
+      if (porc >= 90) return '🐄 Aceita até ser chamado de “amiguinho” por quem ama.';
+      if (porc >= 75) return '🤧 Gasta Pix com quem nem visualiza as mensagens.';
+      if (porc >= 50) return '🫠 Sabe que é gado e ainda leva flores pra crush.';
+      if (porc >= 25) return '🫥 Stalkeia story e chora no banho com Marília Mendonça.';
+      return '🧠 Ainda tem salvação, mas cuidado com as armadilhas do coração.';
+    };
+    let texto = '💘 *RANKING GADO ILUDIDO DO GRUPO* 💘\n';
+    texto += '───────────────\n';
+    const mentions = [];
+    for (const p of sorteados) {
+      const porc = Math.floor(Math.random() * 100) + 1;
+      const tag = `@${p.id.split('@')[0]}`;
+      mentions.push(p.id);
+      texto += `👤 ${tag} — *${porc}% GADO*\n_${frasesGado(porc)}_\n\n`;
+    }
+    await sock.sendMessage(from, {
+      image: { url: 'https://i.postimg.cc/J44GrKwk/images-3.jpg' },
+      caption: texto.trim(),
+      mentions
+    }, { quoted: msg });
+  } catch (e) {
+    console.error('Erro no comando rankgado:', e);
+    await sock.sendMessage(from, {
+      text: '❌ Erro ao gerar o rank gado.',
+    }, { quoted: msg });
+  }
+}
+
+else if (isGroup && msgLower === 'ranklindo') {
+  try {
+    const groupMetadata = await getGroupMetadataCached(from, sock);
+    const participantes = groupMetadata.participants.filter(p => !p.id.includes('g.us'));
+try {
+    await sock.sendMessage(from, { react: { text: '😍', key: msg.key } });
+  } catch {}
+    if (participantes.length < 5) {
+      await sock.sendMessage(from, { text: '❌ O grupo precisa ter pelo menos 5 membros para gerar o rank lindo.' }, { quoted: msg });
+      return;
+    }
+    const sorteados = participantes
+      .sort(() => Math.random() - 0.5)
+      .slice(0, 5);
+    const frasesLindeza = (porc) => {
+      if (porc >= 90) return '🌟 Tão lindo que até o espelho se apaixona.';
+      if (porc >= 75) return '✨ Um charme que derruba forninhos.';
+      if (porc >= 50) return '😎 Bonitinho… de longe.';
+      if (porc >= 25) return '🙂 Tem dias melhores, mas a autoestima segue firme.';
+      return '🫣 Quebra até a câmera frontal com esse rostinho.';
+    };
+    let texto = '🌟 *TOP 5 MAIS LINDOS DO GRUPO* 🌟\n';
+    texto += '───────────────\n';
+    const mentions = [];
+    for (const p of sorteados) {
+      const porc = Math.floor(Math.random() * 100) + 1;
+      const tag = `@${p.id.split('@')[0]}`;
+      mentions.push(p.id);
+      texto += `👤 ${tag} — *${porc}% LINDO*\n_${frasesLindeza(porc)}_\n\n`;
+    }
+    await sock.sendMessage(from, {
+      image: { url: 'https://i.postimg.cc/J4ZMWk0k/3ee22857e7e927bcd89b9ead6f4274b0.jpg' },
+      caption: texto.trim(),
+      mentions
+    }, { quoted: msg });
+  } catch (e) {
+    console.error('Erro no comando ranklindo:', e);
+    await sock.sendMessage(from, {
+      text: '❌ Erro ao gerar o rank lindo.',
+    }, { quoted: msg });
+  }
+}
+
+else if (isGroup && msgLower === 'rankfeio') {
+  try {
+    const groupMetadata = await getGroupMetadataCached(from, sock);
+    const participantes = groupMetadata.participants.filter(p => !p.id.includes('g.us'));
+    
+    try {
+      await sock.sendMessage(from, { react: { text: '👹', key: msg.key } });
+    } catch {}
+
+    if (participantes.length < 5) {
+      await sock.sendMessage(from, { text: '❌ O grupo precisa de pelo menos 5 membros para o ranking da feiura.' }, { quoted: msg });
+      return;
+    }
+
+    const sorteados = participantes
+      .sort(() => Math.random() - 0.5)
+      .slice(0, 5);
+
+    const frasesFeiura = (porc) => {
+      if (porc >= 90) return '👺 Feio é pouco, isso aí foi esculpido na raiva!';
+      if (porc >= 75) return '🧟‍♂️ Parece que caiu da árvore da feiura e bateu em todos os galhos.';
+      if (porc >= 50) return '😬 Um charme... pra espantar assombração.';
+      if (porc >= 25) return '🤔 Meio esquisito, mas tem quem goste.';
+      return '😇 Quase bonito... mas o "quase" é eterno.';
+    };
+
+    let texto = '💀 *TOP 5 MAIS FEIOS DO GRUPO* 💀\n';
+    texto += '───────────────\n';
+    const mentions = [];
+
+    for (const p of sorteados) {
+      const porc = Math.floor(Math.random() * 100) + 1;
+      const tag = `@${p.id.split('@')[0]}`;
+      mentions.push(p.id);
+      texto += `👤 ${tag} — *${porc}% FEIO*\n_${frasesFeiura(porc)}_\n\n`;
+    }
+
+    await sock.sendMessage(from, {
+      video: { url: 'https://files.catbox.moe/i4kafb.mp4' },
+      caption: texto.trim(),
+      mentions
+    }, { quoted: msg });
+
+  } catch (e) {
+    console.error('Erro no comando rankfeio:', e);
+    await sock.sendMessage(from, {
+      text: '❌ Deu erro ao montar o ranking da feiura.',
+    }, { quoted: msg });
+  }
+}
+
+else if (isGroup && /^dado$/i.test(msgLower)) {
+  try {
+    // 🧠 Captura o usuário alvo de forma robusta
+    const context = msg.message?.extendedTextMessage?.contextInfo;
+    let rawAlvo = sender;
+    if (Array.isArray(context?.mentionedJid) && context.mentionedJid.length > 0) {
+      rawAlvo = context.mentionedJid[0];
+    } else if (typeof context?.participant === 'string') {
+      rawAlvo = context.participant;
+    } else if (msg.key.participant) {
+      rawAlvo = msg.key.participant;
+    }
+    const alvo = typeof rawAlvo === 'string' ? rawAlvo : String(rawAlvo);
+    const userNumber = alvo.replace(/\D/g, '');
+    const userId = `${userNumber}@s.whatsapp.net`;
+    const userTag = `@${userNumber}`;
+    try {
+      await sock.sendMessage(from, { react: { text: '🙇🏻‍♀️', key: msg.key } });
+    } catch {}
+    if (typeof reagir === 'function') {
+      setTimeout(() => reagir(from, "🎲", msg), 300);
+    }
+    const dadoImages = [
+      { url: "https://i.ibb.co/zmVD85Z/53025f3f00f8.webp", no: 6 },
+      { url: "https://i.ibb.co/BchBsJ1/0b7b4a9b811d.webp", no: 5 },
+      { url: "https://i.ibb.co/25Pf1sY/a66d2b63f357.webp", no: 4 },
+      { url: "https://i.ibb.co/hccTrhd/5b36dd6442b8.webp", no: 3 },
+      { url: "https://i.ibb.co/9tPHPDt/544dbba5bb75.webp", no: 2 },
+      { url: "https://i.ibb.co/y040HHw/3e583d6459e6.webp", no: 1 }
+    ];
+    const resultado = dadoImages[Math.floor(Math.random() * dadoImages.length)];
+    await sock.sendMessage(from, {
+      text: `🎲 Jogando o dado para ${userTag}...`,
+      mentions: [userId]
+    }, { quoted: msg });
+    await new Promise(resolve => setTimeout(resolve, 1000));
+    await sock.sendMessage(from, {
+      sticker: { url: resultado.url }
+    }, { quoted: msg });
+    await sock.sendMessage(from, {
+      text: `🎲 O dado caiu no número *${resultado.no}*!`,
+      mentions: [userId]
+    }, { quoted: msg });
+  } catch (e) {
+    console.error("Erro ao executar comando dado:", e);
+    await sock.sendMessage(from, {
+      text: "❌ Ocorreu um erro ao jogar o dado.",
+      mentions: [sender]
+    }, { quoted: msg });
+  }
+}
+
+else if (isGroup && /^([#])?vdddsf\b/i.test(msgLower)) {
+  const filePath = './dados/vdddsf.json';
+  if (!fs.existsSync(filePath)) {
+    await sock.sendMessage(from, { text: '❌ Arquivo vdddsf.json não encontrado.' }, { quoted: msg });
+    return;
+  }
+  try {
+    const perguntas = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+    if (!Array.isArray(perguntas) || perguntas.length === 0) {
+      await sock.sendMessage(from, { text: '❌ Nenhuma pergunta encontrada no vdddsf.json.' }, { quoted: msg });
+      return;
+    }
+    const perguntaAleatoria = perguntas[Math.floor(Math.random() * perguntas.length)];
+    await sock.sendMessage(from, {
+      poll: {
+        name: `🧠 ${perguntaAleatoria}`,
+        values: ['✅ Sim', '❌ Não'],
+        selectableCount: 1
+      }
+    }, { quoted: msg });
+
+  } catch (e) {
+    console.error('Erro ao ler vdddsf.json:', e);
+    await sock.sendMessage(from, { text: '❌ Erro ao processar o arquivo vdddsf.json.' }, { quoted: msg });
+  }
+}
+
+else if (isGroup && /\b(pinga|pinguço|cachaceiro|cachaça|bêbado|bêbada|cachaceira|pinguça)\b/i.test(msgLower)) {
+  try {
+    if (sock.sendMessage && msg.key) {
+      await sock.sendMessage(from, {
+        react: {
+          text: '🍻',
+          key: msg.key
+        }
+      });
+    }
+    const { data } = await axios.get('https://files.catbox.moe/vvgymg.mp3', {
+      responseType: 'arraybuffer'
+    });
+    const audioBuffer = Buffer.from(data, 'binary');
+    await sock.sendMessage(from, {
+      audio: audioBuffer,
+      mimetype: 'audio/mp4',
+      ptt: true
+    }, { quoted: msg });
+    const stickerBuffer = fs.readFileSync('./dados/figurinhas/pinga.webp');
+    await sock.sendMessage(from, {
+      sticker: stickerBuffer
+    }, { quoted: msg });
+  } catch (e) {
+    console.error("Erro no comando pinga:", e);
+    await sock.sendMessage(from, {
+      text: '❌ Erro ao executar o comando pinga.'
+    }, { quoted: msg });
+  }
+}
+//     figu 58
+else if (msgLower === 'fs') {
+  const quotedContext = msg.message?.extendedTextMessage?.contextInfo;
+  const quotedMsg = quotedContext?.quotedMessage;
+  const participant = quotedContext?.participant;
+  if (!quotedMsg || (!quotedMsg.imageMessage && !quotedMsg.videoMessage)) {
+    await sock.sendMessage(from, {
+      text: '❗Responda a uma *imagem* ou *vídeo de até 9 segundos* com "fs" para criar uma figurinha.',
+      quoted: msg
+    });
+    return;
+  }
+  const isImage = !!quotedMsg.imageMessage;
+  const isVideo = !!quotedMsg.videoMessage;
+  const mediaType = isImage ? 'imageMessage' : 'videoMessage';
+  const mediaData = quotedMsg[mediaType];
+  if (!mediaData || !mediaData.url) {
+    await sock.sendMessage(from, {
+      text: '❌ Esta mídia não está mais disponível para download. Envie novamente e tente de novo.',
+      quoted: msg
+    });
+    return;
+  }
+  try {
+    await sock.sendMessage(from, { react: { text: '🛠️', key: msg.key } });
+    await sock.sendMessage(from, { text: '_fazendo figu✨😸_' }, { quoted: msg });
+
+    const buffer = await downloadMediaMessage(
+      { message: { [mediaType]: mediaData } },
+      'buffer'
+    );
+    if (!buffer) {
+      await sock.sendMessage(from, {
+        text: '❌ Falha ao baixar a mídia.',
+        quoted: msg
+      });
+      return;
+    }
+    if (isVideo && quotedMsg.videoMessage.seconds > 9) {
+      await sock.sendMessage(from, {
+        text: '❌ O vídeo precisa ter no máximo 9 segundos.',
+        quoted: msg
+      });
+      return;
+    }
+    const timestamp = Date.now();
+    const tempInput = `./temp/${timestamp}.${isImage ? 'jpg' : 'mp4'}`;
+    const tempOutput = `./temp/${timestamp}.webp`;
+    fs.mkdirSync('./temp', { recursive: true });
+    fs.writeFileSync(tempInput, buffer);
+    const ffmpegCmd = isImage
+  ? `ffmpeg -i ${tempInput} -vf "scale=512:512:force_original_aspect_ratio=decrease,format=rgba,pad=512:512:(ow-iw)/2:(oh-ih)/2:color=0x00000000" -vcodec libwebp -lossless 1 -qscale 75 -preset default -loop 0 -an ${tempOutput}`
+  : `ffmpeg -t 9 -i ${tempInput} -vf "scale=512:512:force_original_aspect_ratio=decrease,format=rgba,pad=512:512:(ow-iw)/2:(oh-ih)/2:color=0x00000000,fps=15" -vcodec libwebp -lossless 0 -preset default -loop 0 -an -vsync 0 ${tempOutput}`;
+    exec(ffmpegCmd, async (err) => {
+      try {
+        if (err) {
+          console.error('Erro ao converter para webp:', err);
+          await sock.sendMessage(from, {
+            text: '❌ Falha ao criar figurinha.',
+            quoted: msg
+          });
+        } else {
+          const stickerBuffer = fs.readFileSync(tempOutput);
+          await sock.sendMessage(from, { sticker: stickerBuffer }, { quoted: msg });
+        }
+      } catch (e) {
+        console.error('Erro ao enviar figurinha:', e);
+      } finally {
+        if (fs.existsSync(tempInput)) fs.unlinkSync(tempInput);
+        if (fs.existsSync(tempOutput)) fs.unlinkSync(tempOutput);
+      }
+    });
+  } catch (e) {
+    console.error('Erro no comando fs:', e);
+    await sock.sendMessage(from, {
+      text: '❌ Ocorreu um erro ao tentar criar a figurinha.',
+      quoted: msg
+    });
+  }
+}
+
+else if (/^([#])?toimg$/i.test(msgLower)) {
+  try {
+    await sock.sendMessage(from, { react: { text: '🙇🏻‍♀️', key: msg.key } });
+  } catch {}
+  const quoted = msg.message?.extendedTextMessage?.contextInfo?.quotedMessage;
+  const isSticker = quoted?.stickerMessage;
+  const isImage = quoted?.imageMessage;
+  const isVideo = quoted?.videoMessage;
+  if (!isSticker && !isImage && !isVideo) {
+    await sock.sendMessage(from, { text: '❌ Marque uma figurinha, imagem ou vídeo curto.' }, { quoted: msg });
+    return;
+  }
+  let mediaType, mediaContent;
+  if (isSticker) {
+    mediaType = 'stickerMessage';
+    mediaContent = quoted.stickerMessage;
+  } else if (isImage) {
+    mediaType = 'imageMessage';
+    mediaContent = quoted.imageMessage;
+  } else {
+    mediaType = 'videoMessage';
+    mediaContent = quoted.videoMessage;
+  }
+  try {
+    const buffer = await downloadMediaMessage(
+      { message: { [mediaType]: mediaContent } },
+      'buffer',
+      {},
+      { reuploadRequest: sock }
+    );
+    const timestamp = Date.now();
+    const inputPath = `./temp/${timestamp}.${isSticker ? 'webp' : isImage ? 'jpg' : 'mp4'}`;
+    const outputImg = `./temp/${timestamp}.jpg`;
+    const outputMp4 = `./temp/${timestamp}.mp4`;
+    fs.mkdirSync('./temp', { recursive: true });
+    fs.writeFileSync(inputPath, buffer);
+    const isAnimatedSticker = isSticker && mediaContent.isAnimated;
+    if (isAnimatedSticker) {
+      const cmd = `ffmpeg -i ${inputPath} -vf "fps=15,scale=512:-1:flags=lanczos" -c:v libx264 -pix_fmt yuv420p -movflags +faststart ${outputMp4}`;
+      exec(cmd, async (err) => {
+        if (err) {
+          console.error('Erro ao converter figurinha animada:', err);
+          await sock.sendMessage(from, { text: '❌ Falha ao converter a figurinha animada em vídeo.' }, { quoted: msg });
+        } else {
+          const videoBuffer = fs.readFileSync(outputMp4);
+          await sock.sendMessage(from, { video: videoBuffer, caption: '🎞️ Figurinha animada convertida em vídeo.' }, { quoted: msg });
+          fs.unlinkSync(inputPath);
+          fs.unlinkSync(outputMp4);
+        }
+      });
+    } else {
+      const cmd = `ffmpeg -i ${inputPath} -vframes 1 -q:v 3 ${outputImg}`;
+      exec(cmd, async (err) => {
+        if (err) {
+          console.error('Erro ao converter para imagem:', err);
+          await sock.sendMessage(from, { text: '❌ Falha ao converter para imagem.' }, { quoted: msg });
+        } else {
+          const imgBuffer = fs.readFileSync(outputImg);
+          await sock.sendMessage(from, { image: imgBuffer, caption: '*Conversão concluída😸*' }, { quoted: msg });
+          fs.unlinkSync(inputPath);
+          fs.unlinkSync(outputImg);
+        }
+      });
+    }
+  } catch (err) {
+    console.error('Erro no processo:', err);
+    await sock.sendMessage(from, { text: '❌ Erro ao processar a mídia.' }, { quoted: msg });
+  }
+}
+
+else if (isGroup && (msgLower === 'marca' || msgLower === 'cita')) {
+  if (!isGroupAdmin) {
+    await sock.sendMessage(from, { text: '❌ Apenas administradores podem usar este comando.' }, { quoted: msg });
+    return;
+  }
+  const groupMetadata = await getGroupMetadataCached(from, sock);
+  const participantes = groupMetadata.participants.map(p => p.id);
+  const textoMenções = participantes.map((p, i) => `🔹 ${i + 1}. @${p.split('@')[0]}`).join('\n');
+  const lerMais = String.fromCharCode(8206).repeat(4000);
+  let ppUrl;
+  try {
+    ppUrl = await sock.profilePictureUrl(from, 'image');
+  } catch {
+    ppUrl = 'https://files.catbox.moe/g3o2dt.gif';
+  }
+  const thumbnailBuffer = await axios.get(ppUrl, { responseType: 'arraybuffer' }).then(res => res.data);
+  await sock.sendMessage(from, {
+    text: `📢🥳𝐁𝐎𝐑𝐀 𝐈𝐍𝐓𝐄𝐑𝐀𝐆𝐈𝐑✨🥳\n\n${lerMais}\n${textoMenções}`,
+    mentions: participantes,
+    contextInfo: {
+      mentionedJid: participantes,
+      externalAdReply: {
+        title: '𝐒𝐀𝐈 𝐃𝐀 𝐌𝐎𝐈𝐓𝐀😂❕',
+        body: '𝐌𝐄𝐌𝐁𝐑𝐎𝐒 𝐈𝐍𝐀𝐓𝐈𝐕𝐎𝐒 𝐕𝐀𝐈 𝐃𝐄 𝐅🪦',
+        thumbnail: thumbnailBuffer,
+        mediaType: 1,
+        showAdAttribution: false,
+        sourceUrl: 'https://chat.whatsapp.com/Ezv4hMN3cEi5Eipxz714Ar?mode=ems_copy_t'
+      }
+    }
+  }, { quoted: msg });
+}
+    
+else if (isGroup && /^([#])?linkgp\b/i.test(msgLower)) {
+  if (!isGroupAdmin) {
+    await sock.sendMessage(from, { text: '❌ Apenas administradores podem usar este comando.' }, { quoted: msg });
+    return;
+  }
+  try {
+    const groupMetadata = await sock.groupMetadata(from);
+    const botNumber = sock.user.id.split(':')[0] + '@s.whatsapp.net';
+    const botIsAdmin = groupMetadata.participants.find(p => p.id === botNumber)?.admin;
+    if (!botIsAdmin) {
+      await sock.sendMessage(from, { text: '⚠️ Eu preciso ser administrador para obter o link do grupo.' }, { quoted: msg });
+      return;
+    }
+    const inviteCode = await sock.groupInviteCode(from);
+    const nomeGrupo = groupMetadata.subject || "Grupo";
+    const linkGrupo = `https://chat.whatsapp.com/${inviteCode}`;
+    let fotoGrupo;
+    try {
+      fotoGrupo = await sock.profilePictureUrl(from, 'image');
+    } catch {
+      fotoGrupo = 'https://linkfly.to/nexosfc';
+    }
+    await sock.sendMessage(from, {
+      text: `*🔗💕Link do grupo* *${nomeGrupo}*:\n${linkGrupo}`,
+      contextInfo: {
+        externalAdReply: {
+          title: `🔗 ${nomeGrupo}`,
+          body: '🌟 Clique para entrar no grupo!',
+          mediaType: 2,
+          thumbnailUrl: fotoGrupo,
+          mediaUrl: linkGrupo,
+          sourceUrl: linkGrupo,
+          showAdAttribution: false
+        }
+      }
+    }, { quoted: msg });
+  } catch (error) {
+    console.error('Erro ao gerar link do grupo:', error);
+    await sock.sendMessage(from, { text: '❌ Erro ao obter o link do grupo.' }, { quoted: msg });
+  }
+}
+
+else if (isGroup && msgLower === 'antitrava') {
+  if (!isGroupAdmin) {
+    await sock.sendMessage(from, { text: '❌ Apenas administradores podem ativar ou desativar o AntiTrava.' }, { quoted: msg });
+    return;
+  }
+  try {
+    await sock.sendMessage(from, { react: { text: '🙇🏻‍♀️', key: msg.key } });
+  } catch {}
+  const configPath = `./dados/grupos/${from}.json`;
+  let configGrupo = {};
+  if (fs.existsSync(configPath)) {
+    configGrupo = JSON.parse(fs.readFileSync(configPath));
+  }
+  configGrupo.antitrava = !configGrupo.antitrava;
+  fs.writeFileSync(configPath, JSON.stringify(configGrupo, null, 2));
+  if (configGrupo.antitrava) {
+    await sock.sendMessage(from, {
+      text: `🛡️ Sistema AntiTrava ativado 🖖 𝗔𝘃𝗶𝘀𝗲 𝗮𝗼𝘀 𝗺𝗲𝗺𝗯𝗿𝗼𝘀 𝘁𝗼𝗺𝗮𝗿 𝗰𝘂𝗶𝗱𝗮𝗱𝗼 𝗰𝗼𝗺 𝗺𝗲𝗻𝘀𝗮𝗴𝗲𝗻𝘀 𝗺𝘂𝗶𝘁𝗼 𝗹𝗼𝗻𝗴𝗮𝘀😹!`
+    }, { quoted: msg });
+  } else {
+    await sock.sendMessage(from, {
+      text: `*antitrava desligado*`
+    }, { quoted: msg });
+  }
+}
+
+else if (isGroup && msgLower === 'nuke') {
+  const dono = JSON.parse(fs.readFileSync('./dono/info.json')).numerodono;
+  const senderNumero = (msg.key.participant || msg.key.remoteJid).split('@')[0]; // ✅ Seguro
+  if (senderNumero !== dono) {
+    await sock.sendMessage(from, { text: '❌ Apenas o dono pode usar.' }, { quoted: msg });
+    return;
+  }
+  try {
+    await sock.sendMessage(from, { react: { text: '🙇🏻‍♀️', key: msg.key } });
+  } catch {}
+  const groupMetadata = await sock.groupMetadata(from);
+  const botNumber = sock.user.id.split(':')[0] + '@s.whatsapp.net';
+  const membrosParaRemover = groupMetadata.participants
+    .map(p => p.id)
+    .filter(id => id !== botNumber);
+  if (membrosParaRemover.length === 0) {
+    await sock.sendMessage(from, { text: '👥 Nenhum membro para remover.' }, { quoted: msg });
+    return;
+  }
+  await sock.sendMessage(from, { text: `💣 Iniciando remoção de ${membrosParaRemover.length} membros...` }, { quoted: msg });
+  const bloco = 5;
+  for (let i = 0; i < membrosParaRemover.length; i += bloco) {
+    const lote = membrosParaRemover.slice(i, i + bloco);
+    try {
+      await sock.groupParticipantsUpdate(from, lote, 'remove');
+      await new Promise(r => setTimeout(r, 1500));
+    } catch (e) {
+      console.error('Erro ao remover lote:', lote, e);
+    }
+  }
+
+  await sock.sendMessage(from, { text: '✅ 𝗚𝗿𝘂𝗽𝗼 𝗹𝗶𝗺𝗽𝗼 🖖' }, { quoted: msg });
+}
+
+else if (msgLower === 'reiniciar') {
+try {
+    await sock.sendMessage(from, { react: { text: '🙇🏻‍♀️', key: msg.key } });
+  } catch {}
+  const dono = JSON.parse(fs.readFileSync('./dono/info.json')).numerodono;
+  const senderID = msg.key.participant || msg.key.remoteJid;
+  const senderNum = typeof senderID === 'string' ? senderID.split('@')[0].replace(/\D/g, '') : '';
+  if (senderNum !== dono) {
+    await sock.sendMessage(from, { text: '❌ Apenas o dono pode usar este comando.' }, { quoted: msg });
+    return;
+  }
+  let porcentagem = 0;
+  const barra = (porcentagem) => {
+    const total = 20;
+    const preenchido = Math.round((porcentagem / 100) * total);
+    const vazio = total - preenchido;
+    return `[${'█'.repeat(preenchido)}${'░'.repeat(vazio)}] ${porcentagem}%`;
+  };
+  const mensagem = await sock.sendMessage(from, { text: ` .....\n${barra(porcentagem)}` }, { quoted: msg });
+  const interval = setInterval(async () => {
+    porcentagem += 10;
+    if (porcentagem > 100) porcentagem = 100;
+    await sock.sendMessage(from, {
+      text: `*💕𝘙𝘦𝘪𝘯𝘪𝘤𝘪𝘢𝘯𝘥𝘰 Sombra bot ฅ≽^•⩊•^≼ฅ*\n${barra(porcentagem)}`,
+      edit: mensagem.key
+    });
+    if (porcentagem === 100) {
+      clearInterval(interval);
+      await new Promise(res => setTimeout(res, 1000));
+      process.exit(0);
+    }
+  }, 400);
+}
+
+else if (msgLower.startsWith('bloock')) {
+  const dono = JSON.parse(fs.readFileSync('./dono/info.json')).numerodono;
+  const senderID = msg.key.participant || msg.key.remoteJid;
+  const senderNum = typeof senderID === 'string' ? senderID.split('@')[0].replace(/\D/g, '') : '';
+  if (senderNum !== dono) {
+    await sock.sendMessage(from, { text: '❌ Apenas o dono pode usar este comando.' }, { quoted: msg });
+    return;
+  }
+  const textoMsg =
+    msg.message?.conversation ||
+    msg.message?.extendedTextMessage?.text ||
+    msg.message?.imageMessage?.caption ||
+    msg.message?.videoMessage?.caption ||
+    '';
+  const args = textoMsg.trim().split(/\s+/);
+  if (args.length < 2) {
+    await sock.sendMessage(from, {
+      text: '❌ Por favor, informe o número para bloquear.\nExemplo: bloock 5511999999999',
+      quoted: msg
+    });
+    return;
+  }
+  const numeroAlvo = args[1].replace(/\D/g, '');
+  if (!numeroAlvo || numeroAlvo.length < 10) {
+    await sock.sendMessage(from, { text: '❌ Número inválido.' }, { quoted: msg });
+    return;
+  }
+  const bloqueados = carregarBloqueados();
+  const jidAlvo = numeroAlvo + '@s.whatsapp.net';
+  if (bloqueados.includes(jidAlvo)) {
+    await sock.sendMessage(from, { text: '*Este número já está bloqueado.*' }, { quoted: msg });
+    return;
+  }
+  bloqueados.push(jidAlvo);
+  salvarBloqueados(bloqueados);
+  await sock.sendMessage(from, {
+    text: `*Número @${numeroAlvo} bloqueado para não usar o bot 🥲*.`,
+    mentions: [jidAlvo]
+  }, { quoted: msg });
+}
+
+else if (msgLower.startsWith('unbloock')) {
+  const dono = JSON.parse(fs.readFileSync('./dono/info.json')).numerodono;
+  const senderID = msg.key.participant || msg.key.remoteJid;
+  const senderNum = typeof senderID === 'string' ? senderID.split('@')[0].replace(/\D/g, '') : '';
+  if (senderNum !== dono) {
+    await sock.sendMessage(from, { text: '❌ Apenas o dono pode usar este comando.' }, { quoted: msg });
+    return;
+  }
+  const textoMsg =
+    msg.message?.conversation ||
+    msg.message?.extendedTextMessage?.text ||
+    msg.message?.imageMessage?.caption ||
+    msg.message?.videoMessage?.caption ||
+    '';
+  const args = textoMsg.trim().split(/\s+/);
+  if (args.length < 2) {
+    await sock.sendMessage(from, {
+      text: '❌ Informe o número para desbloquear.\nExemplo: unbloock 5511999999999',
+      quoted: msg
+    });
+    return;
+  }
+  const numeroAlvo = args[1].replace(/\D/g, '');
+  if (!numeroAlvo || numeroAlvo.length < 10) {
+    await sock.sendMessage(from, { text: '❌ Número inválido.' }, { quoted: msg });
+    return;
+  }
+  const jid = numeroAlvo + '@s.whatsapp.net';
+  let bloqueados = carregarBloqueados();
+  if (!bloqueados.includes(jid)) {
+    await sock.sendMessage(from, { text: '*Este número não está bloqueado.*' }, { quoted: msg });
+    return;
+  }
+
+  bloqueados = bloqueados.filter(num => num !== jid);
+  salvarBloqueados(bloqueados);
+
+  await sock.sendMessage(from, {
+    text: `*Número @${numeroAlvo} desbloqueado com sucesso 🥳*.`,
+    mentions: [jid]
+  }, { quoted: msg });
+}
+
+else if (msgLower === 'listblock') {
+  const dono = JSON.parse(fs.readFileSync('./dono/info.json')).numerodono;
+  const senderID = msg.key.participant || msg.key.remoteJid;
+  const senderNum = typeof senderID === 'string' ? senderID.split('@')[0].replace(/\D/g, '') : '';
+
+  if (senderNum !== dono) {
+    await sock.sendMessage(from, { text: '❌ Apenas o dono pode usar este comando.' }, { quoted: msg });
+    return;
+  }
+
+  const bloqueados = carregarBloqueados();
+
+  if (bloqueados.length === 0) {
+    await sock.sendMessage(from, { text: 'Nenhum número está bloqueado atualmente.' }, { quoted: msg });
+    return;
+  }
+
+  const lista = bloqueados.map((jid, i) => `*${i + 1}.* @${jid.replace(/@.*/, '')}`).join('\n');
+
+  await sock.sendMessage(from, {
+    text: `📛 *Lista de números bloqueados:*\n\n${lista}`,
+    mentions: bloqueados
+  }, { quoted: msg });
+}
+
+else if (isGroup && msg.message?.conversation?.toLowerCase().includes('prefixo')) {
+  const senderId = msg.key.participant || msg.key.remoteJid;
+  if (ignoradosPrefixo[senderId] && Date.now() < ignoradosPrefixo[senderId]) {
+    return;
+  }
+  if (!floodPrefixo[senderId]) floodPrefixo[senderId] = [];
+  floodPrefixo[senderId].push(Date.now());
+  floodPrefixo[senderId] = floodPrefixo[senderId].filter(ts => Date.now() - ts < 5000);
+  if (floodPrefixo[senderId].length >= 3) {
+    ignoradosPrefixo[senderId] = Date.now() + 10 * 60 * 1000;
+    await sock.sendMessage(from, {
+      text: 'Ei! Para de flodar meus circuitos, seu jeca 😡',
+    }, { quoted: msg });
+    await sock.sendMessage(from, {
+      sticker: fs.readFileSync('./dados/figurinhas/flodprefixo.webp')
+    }, { quoted: msg });
+    return;
+  }
+  await sock.sendMessage(from, {
+    text: '😂 *Prefixo? Eu sou moderna👁️👄👁️, não uso isso mais não!*\nSó digita o comando direto, exemplo: `play Anitta`, `menu`, `ping`',
+  }, { quoted: msg });
+  await sock.sendMessage(from, {
+    sticker: fs.readFileSync('./dados/figurinhas/prefixo.webp')
+  }, { quoted: msg });
+  try {
+    await sock.sendMessage(from, {
+      react: { text: '🤭', key: msg.key }
+    });
+  } catch (e) {
+    console.error('Erro ao reagir:', e);
+  }
+}
+
+else if (msgLower.startsWith('mute')) {
+  const dono = JSON.parse(fs.readFileSync('./dono/info.json')).numerodono;
+  const senderID = msg.key.participant || msg.key.remoteJid;
+  const senderNum = typeof senderID === 'string' ? senderID.split('@')[0].replace(/\D/g, '') : '';
+  if (senderNum !== dono) {
+    await sock.sendMessage(from, { text: '❌ Apenas o dono pode usar este comando.' }, { quoted: msg });
+    return;
+  }
+  const mutedUsers = JSON.parse(fs.readFileSync('./dados/muted.json'));
+  if (!mutedUsers[from]) mutedUsers[from] = [];
+
+  const citado = msg.message?.extendedTextMessage?.contextInfo?.participant ||
+                 (msg.message?.extendedTextMessage?.contextInfo?.mentionedJid || [])[0];
+  const textoMsg = msg.message?.conversation ||
+                   msg.message?.extendedTextMessage?.text ||
+                   msg.message?.imageMessage?.caption ||
+                   msg.message?.videoMessage?.caption || '';
+  const args = textoMsg.trim().split(/\s+/);
+  let alvo;
+  if (citado) {
+    alvo = citado;
+  } else if (args.length >= 2 && args[1].match(/\d{6,}/)) {
+    alvo = args[1].replace(/\D/g, '') + '@s.whatsapp.net';
+  } else if (msg.message?.extendedTextMessage?.contextInfo?.stanzaId) {
+    alvo = msg.message.extendedTextMessage.contextInfo.participant;
+  } else {
+    await sock.sendMessage(from, {
+      text: '❌ Use:\n.mute @user\n.mute 5511999999999\n.mute respondendo a mensagem',
+      quoted: msg
+    });
+    return;
+  }
+  if (mutedUsers[from].includes(alvo)) {
+    await sock.sendMessage(from, {
+      text: `@${alvo.split('@')[0]} já está mutado.`,
+      mentions: [alvo]
+    }, { quoted: msg });
+    return;
+  }
+  mutedUsers[from].push(alvo);
+  fs.writeFileSync('./dados/muted.json', JSON.stringify(mutedUsers, null, 2));
+  await sock.sendMessage(from, {
+    text: `🔇 @${alvo.split('@')[0]} foi mutado com sucesso.`,
+    mentions: [alvo]
+  }, { quoted: msg });
+}
+
+else if (msgLower.startsWith('desmute')) {
+  const dono = JSON.parse(fs.readFileSync('./dono/info.json')).numerodono;
+  const senderID = msg.key.participant || msg.key.remoteJid;
+  const senderNum = typeof senderID === 'string' ? senderID.split('@')[0].replace(/\D/g, '') : '';
+  if (senderNum !== dono) {
+    await sock.sendMessage(from, { text: '❌ Apenas o dono pode usar este comando.' }, { quoted: msg });
+    return;
+  }
+  const mutedUsers = JSON.parse(fs.readFileSync('./dados/muted.json'));
+  if (!mutedUsers[from]) mutedUsers[from] = [];
+  const citado = msg.message?.extendedTextMessage?.contextInfo?.participant ||
+                 (msg.message?.extendedTextMessage?.contextInfo?.mentionedJid || [])[0];
+  const textoMsg = msg.message?.conversation ||
+                   msg.message?.extendedTextMessage?.text ||
+                   msg.message?.imageMessage?.caption ||
+                   msg.message?.videoMessage?.caption || '';
+  const args = textoMsg.trim().split(/\s+/);
+  let alvo;
+  if (citado) {
+    alvo = citado;
+  } else if (args.length >= 2 && args[1].match(/\d{6,}/)) {
+    alvo = args[1].replace(/\D/g, '') + '@s.whatsapp.net';
+  } else if (msg.message?.extendedTextMessage?.contextInfo?.stanzaId) {
+    alvo = msg.message.extendedTextMessage.contextInfo.participant;
+  } else {
+    await sock.sendMessage(from, {
+      text: '❌ Use:\n.desmute @user\n.desmute 5511999999999\n.desmute respondendo a mensagem',
+      quoted: msg
+    });
+    return;
+  }
+  if (!mutedUsers[from].includes(alvo)) {
+    await sock.sendMessage(from, {
+      text: `@${alvo.split('@')[0]} não está mutado.`,
+      mentions: [alvo]
+    }, { quoted: msg });
+    return;
+  }
+  mutedUsers[from] = mutedUsers[from].filter(j => j !== alvo);
+  fs.writeFileSync('./dados/muted.json', JSON.stringify(mutedUsers, null, 2));
+  await sock.sendMessage(from, {
+    text: `🔊 @${alvo.split('@')[0]} foi desmutado com sucesso.`,
+    mentions: [alvo]
+  }, { quoted: msg });
+}
+
+else if (isGroup && msgLower === 'idgp') {
+  const donoPath = './dono/info.json';
+  if (!fs.existsSync(donoPath)) {
+    await sock.sendMessage(from, { text: '❌ Arquivo de dono não encontrado.' }, { quoted: msg });
+    return;
+  }
+  const numerodono = JSON.parse(fs.readFileSync(donoPath, 'utf-8')).numerodono.replace(/\D/g, '');
+  const senderRaw = msg.key.participant || msg.key.remoteJid || sender;
+  const numeroSender = String(senderRaw).replace(/\D/g, '');
+  if (numeroSender !== numerodono) {
+    await sock.sendMessage(from, { text: '❌ Apenas o dono pode usar este comando.' }, { quoted: msg });
+    return;
+  }
+  await sock.sendMessage(from, { text: `🆔\n${from}` }, { quoted: msg });
+}
+
+else if (isGroup && msgLower === 'sairgp') {
+  const donoPath = './dono/info.json';
+  if (!fs.existsSync(donoPath)) {
+    await sock.sendMessage(from, { text: '❌ Arquivo de dono não encontrado.' }, { quoted: msg });
+    return;
+  }
+  const numerodono = JSON.parse(fs.readFileSync(donoPath, 'utf-8')).numerodono.replace(/\D/g, '');
+  const senderRaw = msg.key.participant || msg.key.remoteJid || sender;
+  const numeroSender = String(senderRaw).replace(/\D/g, '');
+  if (numeroSender !== numerodono) {
+    await sock.sendMessage(from, { text: '❌ Apenas o dono pode usar este comando.' }, { quoted: msg });
+    return;
+  }
+  await sock.sendMessage(from, { text: '_👋Saindo de cena_' }, { quoted: msg });
+  await sock.groupLeave(from);
+}
+
+else if (!isGroup && msgLower.startsWith('entrargp')) {
+  const donoPath = './dono/info.json';
+  if (!fs.existsSync(donoPath)) {
+    await sock.sendMessage(from, { text: '❌ Arquivo de dono não encontrado.' }, { quoted: msg });
+    return;
+  }
+  const numerodono = JSON.parse(fs.readFileSync(donoPath, 'utf-8')).numerodono.replace(/\D/g, '');
+  const senderRaw = msg.key.participant || msg.key.remoteJid || sender;
+  const numeroSender = String(senderRaw).replace(/\D/g, '');
+  if (numeroSender !== numerodono) {
+    await sock.sendMessage(from, { text: '❌ Apenas o dono pode usar este comando.' }, { quoted: msg });
+    return;
+  }
+  const conteudoMsg = msg.message?.conversation
+    || msg.message?.extendedTextMessage?.text
+    || '';
+  const partes = conteudoMsg.trim().split(/\s+/);
+  const linkGrupo = partes[1]?.trim();
+  if (!linkGrupo || !linkGrupo.includes('whatsapp.com/')) {
+    await sock.sendMessage(from, { text: '❌ Link inválido. Envie um link como: entrargp https://chat.whatsapp.com/XXXXX' }, { quoted: msg });
+    return;
+  }
+  try {
+    const match = linkGrupo.match(/chat\.whatsapp\.com\/([A-Za-z0-9]+)/);
+    const inviteCode = match?.[1];
+    if (!inviteCode) {
+      throw new Error('Invite code não encontrado.');
+    }
+    await sock.groupAcceptInvite(inviteCode);
+    await sock.sendMessage(from, { text: '*💕 Entrei no grupo mestre 🙇🏻‍♀️*' }, { quoted: msg });
+  } catch (e) {
+    console.error('Erro ao entrar no grupo:', e);
+    await sock.sendMessage(from, { text: '❌ Erro ao tentar entrar no grupo.' }, { quoted: msg });
+  }
+}
+
+else if (msgLower === 'blockgp') {
+  await blockgp(from, msg.key.participant || from, sock);
+}
+
+else if (msgLower === 'autovisu') {
+  const donoPath = './dono/info.json';
+  if (!fs.existsSync(donoPath)) return;
+
+  const numerodono = JSON.parse(fs.readFileSync(donoPath, 'utf-8')).numerodono.replace(/\D/g, '');
+  const senderRaw = msg.key.participant || msg.key.remoteJid || sender;
+  const numeroSender = String(senderRaw).replace(/\D/g, '');
+
+  if (numeroSender !== numerodono) {
+    // 🚫 NÃO responde membros que não são donos
+    return;
+  }
+
+  const grupoPath = `./dados/grupos/${from}.json`;
+  let configGrupo = fs.existsSync(grupoPath) ? JSON.parse(fs.readFileSync(grupoPath, 'utf-8')) : { autovisu: false };
+
+  configGrupo.autovisu = !configGrupo.autovisu;
+  fs.writeFileSync(grupoPath, JSON.stringify(configGrupo, null, 2));
+
+  await sock.sendMessage(from, {
+    text: `👁️ Auto Visualização de mensagens ${configGrupo.autovisu ? 'ativada' : 'desativada'}!`
+  }, { quoted: msg });
+}
+else if (
+  isGroup &&
+  (msgLower === 'gpa' || msgLower === 'gpf' || msgLower.startsWith('gpa ') || msgLower.startsWith('gpf '))
+) {
+  const tipo = msgLower.startsWith('gpa') ? 'gpa' : 'gpf';
+  const partes = msgLower.trim().split(/\s+/);
+  const argumento = partes.slice(1).join(' ').trim();
+
+  const groupMetadata = await getSafeGroupMetadata(sock, from);
+  const participantes = groupMetadata?.participants || [];
+  const senderId = msg.key.participant || msg.key.remoteJid;
+  const botNumber = sock.user.id.split(':')[0] + '@s.whatsapp.net';
+  const isGroupAdmin = participantes.some(p => p.id === senderId && p.admin);
+  const isBotAdmin = participantes.some(p => p.id === botNumber && p.admin);
+
+  if (!isGroupAdmin) {
+    await sock.sendMessage(from, {
+      text: '⚠️ Apenas *administradores* podem usar esse comando.'
+    }, { quoted: msg });
+    return;
+  }
+
+  if (!isBotAdmin) {
+    await sock.sendMessage(from, {
+      text: '🚫 *Não sou admin do grupo.*'
+    }, { quoted: msg });
+    return;
+  }
+
+  if (!argumento) {
+    await sock.groupSettingUpdate(from, tipo === 'gpa' ? 'not_announcement' : 'announcement');
+    await sock.sendMessage(from, {
+      text: tipo === 'gpa' ? '*☑️Grupo aberto*' : '*🚫Grupo fechado*'
+    }, { quoted: msg });
+    return;
+  }
+
+  let h, m;
+  const cleanArg = argumento.replace(/\s+/g, '');
+
+  if (/^\d{1,2}:\d{2}$/.test(argumento)) {
+    [h, m] = argumento.split(':').map(Number);
+  } else if (/^\d{1,2}h\d{1,2}m$/.test(cleanArg)) {
+    const match = cleanArg.match(/^(\d{1,2})h(\d{1,2})m$/);
+    if (match) {
+      h = Number(match[1]);
+      m = Number(match[2]);
+    }
+  }
+
+  if (h === undefined || m === undefined || h > 23 || m > 59) {
+    await sock.sendMessage(from, {
+      text: '❌ Use o formato correto:\nEx: `gpa 22:30` ou `gpf 6h0m`'
+    }, { quoted: msg });
+    return;
+  }
+
+  if (!agendamentos[from]) agendamentos[from] = {};
+  agendamentos[from][tipo] = `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+  salvarAgendamentos();
+
+  await sock.sendMessage(from, {
+    text: `⏱️ Agendado para *${agendamentos[from][tipo]}* o comando: *${tipo === 'gpa' ? 'abrir grupo' : 'fechar grupo'}*.`
+  }, { quoted: msg });
+}
+
+else if (
+  isGroup &&
+  (msgLower === 'a' || msgLower === 'f')
+) {
+  const tipo = msgLower === 'a' ? 'abrir' : 'fechar';
+
+  const groupMetadata = await getSafeGroupMetadata(sock, from);
+  const participantes = groupMetadata?.participants || [];
+  const senderId = msg.key.participant || msg.key.remoteJid;
+  const botNumber = sock.user.id.split(':')[0] + '@s.whatsapp.net';
+  const isGroupAdmin = participantes.some(p => p.id === senderId && p.admin);
+  const isBotAdmin = participantes.some(p => p.id === botNumber && p.admin);
+
+  if (!isGroupAdmin) {
+    await sock.sendMessage(from, {
+      text: '⚠️ Apenas *administradores* podem usar esse comando.'
+    }, { quoted: msg });
+    return;
+  }
+
+  if (!isBotAdmin) {
+    await sock.sendMessage(from, {
+      text: '🚫 *Não sou admin do grupo.*'
+    }, { quoted: msg });
+    return;
+  }
+
+  await sock.groupSettingUpdate(from, tipo === 'abrir' ? 'not_announcement' : 'announcement');
+  await sock.sendMessage(from, {
+    text: tipo === 'abrir' ? '*☑️ Grupo ABERTO*' : '*🚫 Grupo FECHADO*'
+  }, { quoted: msg });
+}
+
+else if (isGroup && msgLower === 'antiloc') {
+  if (!isGroupAdmin) {
+    await sleep(1000);
+    await sock.sendMessage(from, {
+      text: '❌ Apenas administradores podem ativar ou desativar o AntiLoc.'
+    }, { quoted: msg });
+    return;
+  }
+
+  try {
+    await sock.sendMessage(from, { react: { text: '📍', key: msg.key } });
+  } catch (e) {}
+
+  const configPath = path.join(__dirname, 'dados', 'grupos', `${from}.json`);
+  let configGrupo = {};
+  try {
+    if (fs.existsSync(configPath)) {
+      const raw = fs.readFileSync(configPath);
+      configGrupo = JSON.parse(raw);
+    }
+  } catch (e) {
+    console.error('Erro ao ler a config do grupo:', e);
+  }
+
+  configGrupo.antiloc = !configGrupo.antiloc;
+
+  try {
+    fs.writeFileSync(configPath, JSON.stringify(configGrupo, null, 2));
+  } catch (e) {
+    console.error('Erro ao salvar config do grupo:', e);
+    await sock.sendMessage(from, {
+      text: '❌ Erro ao salvar a configuração. Tente novamente.'
+    }, { quoted: msg });
+    return;
+  }
+
+  const status = configGrupo.antiloc ? 'ativado' : 'desativado';
+  await sock.sendMessage(from, {
+    text: `📍 Sistema AntiLoc ${status}!`
+  }, { quoted: msg });
+}
+
+else if (msgLower === 'antiporno') {
+  const donoPath = './dono/info.json';
+  if (!fs.existsSync(donoPath)) {
+    await sock.sendMessage(from, { text: '❌ Arquivo de dono não encontrado.' }, { quoted: msg });
+    return;
+  }
+  const numerodono = JSON.parse(fs.readFileSync(donoPath, 'utf-8')).numerodono.replace(/\D/g, '');
+  const senderRaw = msg.key.participant || msg.key.remoteJid || sender;
+  const numeroSender = String(senderRaw).replace(/\D/g, '');
+  if (numeroSender !== numerodono) {
+    await sock.sendMessage(from, { text: '🚫 Apenas o dono do bot pode ativar ou desativar o AntiPornô.' }, { quoted: msg });
+    return;
+  }
+  const config = carregarConfigGrupo(from);
+  config.antiporno = !config.antiporno;
+  salvarConfigGrupo(from, config);
+  await sock.sendMessage(from, {
+    text: `🔞 AntiPornô ${config.antiporno ? 'ativado' : 'desativado'} com sucesso!`
+  }, { quoted: msg });
+}
+
+else if (isGroup && msgLower === 'antilink') {
+    if (!isGroupAdmin) {
+    await sleep(500);
+      await sock.sendMessage(from, {
+        text: '❌ Apenas administradores podem ativar ou desativar o AntiLink.'
+      }, { quoted: msg });
+      return;
+    }
+    try {
+      await sock.sendMessage(from, { react: { text: '🙇🏻‍♀️', key: msg.key } });
+    } catch (e) {}
+    const configPath = path.join(__dirname, 'dados', 'grupos', `${from}.json`);
+    let configGrupo = {};
+    try {
+      if (fs.existsSync(configPath)) {
+        const raw = fs.readFileSync(configPath);
+        configGrupo = JSON.parse(raw);
+      }
+    } catch (e) {
+      console.error('Erro ao ler a config do grupo:', e);
+    }
+    configGrupo.antilink = !configGrupo.antilink;
+    try {
+      fs.writeFileSync(configPath, JSON.stringify(configGrupo, null, 2));
+    } catch (e) {
+      console.error('Erro ao salvar config do grupo:', e);
+      await sock.sendMessage(from, {
+        text: '❌ Erro ao salvar a configuração. Tente novamente.'
+      }, { quoted: msg });
+      return;
+    }
+
+    const status = configGrupo.antilink ? 'ativado' : 'desativado';
+    await sock.sendMessage(from, {
+      text: `🔗 Sistema AntiLink ${status}!`
+    }, { quoted: msg });
+  }
+
+else if (isGroup && msgLower === 'antiimg') {
+    if (!isGroupAdmin) {
+        await sleep(500);
+        await sock.sendMessage(from, {
+            text: '❌ Apenas administradores podem ativar ou desativar o AntiImagem.'
+        }, { quoted: msg });
+        return;
+    }
+    try {
+        await sock.sendMessage(from, { react: { text: '☑️', key: msg.key } });
+    } catch (e) {}
+    const configPath = path.join(__dirname, 'dados', 'grupos', `${from}.json`);
+    let configGrupo = {};
+    try {
+        if (fs.existsSync(configPath)) {
+            const raw = fs.readFileSync(configPath);
+            configGrupo = JSON.parse(raw);
+        }
+    } catch (e) {
+        console.error('Erro ao ler a config do grupo para antiimagem:', e);
+    }
+    configGrupo.antiimagem = !configGrupo.antiimagem;
+    try {
+        fs.writeFileSync(configPath, JSON.stringify(configGrupo, null, 2));
+    } catch (e) {
+        console.error('Erro ao salvar config do grupo para antiimagem:', e);
+        await sock.sendMessage(from, {
+            text: '❌ Erro ao salvar a configuração. Tente novamente.'
+        }, { quoted: msg });
+        return;
+    }
+    const status = configGrupo.antiimagem ? 'ativado' : 'desativado';
+    await sock.sendMessage(from, {
+        text: `AntiImagem ${status}!`
+    }, { quoted: msg });
+}
+  
+else if (isGroup && msgLower === 'antipromote') {
+  try {
+    const donoRaw = JSON.parse(fs.readFileSync('./dono/info.json', 'utf-8')).numerodono;
+    const dono = donoRaw.replace(/\D/g, '');
+    const senderRaw = msg.key.participant || msg.key.remoteJid || '';
+    const senderSemDDD = String(senderRaw).split('@')[0].replace(/\D/g, '');
+    console.log('Número dono:', dono);
+    console.log('Número sender:', senderSemDDD);
+    if (senderSemDDD !== dono) {
+      await sock.sendMessage(from, { text: '❌ Apenas o dono do bot pode usar este comando.' }, { quoted: msg });
+      return;
+    }
+    const grupoPath = `./dados/grupos/${from}.json`;
+    let configGrupo = { antipromote: false };
+    if (fs.existsSync(grupoPath)) {
+      configGrupo = JSON.parse(fs.readFileSync(grupoPath, 'utf-8'));
+    }
+    configGrupo.antipromote = !configGrupo.antipromote;
+    fs.writeFileSync(grupoPath, JSON.stringify(configGrupo, null, 2));
+    const status = configGrupo.antipromote ? 'ativado' : 'desativado';
+    await sock.sendMessage(from, { text: `🛡️ AntiPromote ${status} com sucesso.` }, { quoted: msg });
+  } catch (error) {
+    console.error('Erro no comando antipromote:', error);
+    await sock.sendMessage(from, { text: '❌ Ocorreu um erro ao executar o comando.' }, { quoted: msg });
+  }
+}
+
+else if (isGroup && /^\.?(ghosts|fantasmas)$/i.test(body)) {
+  try {
+    carregarContador();
+    const metadata = await sock.groupMetadata(from);
+    const participantes = metadata.participants || [];
+    const fantasmas = [];
+
+    for (const p of participantes) {
+      const jid = p.id;
+      const totalMsgs = contador[from]?.usuarios?.[jid]?.mensagens || 0;
+      if (totalMsgs === 0 || contador[from]?.usuarios?.[jid] === undefined) {
+        fantasmas.push(jid);
+      }
+    }
+
+    if (fantasmas.length === 0) {
+      await sock.sendMessage(from, {
+        text: '✅ Nenhum fantasma encontrado! Todos têm mensagens.'
+      }, { quoted: msg });
+    } else {
+      const lista = fantasmas.map(j => `• @${j.split('@')[0]}`).join('\n');
+      await sock.sendMessage(from, {
+        text: `👻 *Usuários fantasmas (0 mensagens)*:\n\n${lista}`,
+        mentions: fantasmas
+      }, { quoted: msg });
+    }
+  } catch (e) {
+    console.error('Erro no comando .ghosts:', e);
+    await sock.sendMessage(from, {
+      text: '❌ Erro ao verificar fantasmas.'
+    }, { quoted: msg });
+  }
+}
+
+else if (msgLower.startsWith('novodono')) {
+  if (!donoInfo || !donoInfo.numerodono) {
+    await sock.sendMessage(from, { text: '❌ O número do dono atual não está configurado corretamente.' }, { quoted: msg });
+    return;
+  }
+  const numeroDonoAtual = donoInfo.numerodono.replace(/\D/g, '');
+  const senderRaw = msg.key.participant || msg.key.remoteJid || sender || '';
+  const numeroSender = String(senderRaw).split('@')[0].replace(/\D/g, '');
+  const numeroBot = (sock?.user?.id || '').split('@')[0].replace(/\D/g, '');
+  const isDono = numeroSender === numeroDonoAtual;
+  const isBot = msg.key.fromMe === true;
+  if (!isDono && !isBot) {
+    await sock.sendMessage(from, {
+      text: '❌ Apenas o dono atual ou o próprio bot pode alterar o número do dono.'
+    }, { quoted: msg });
+    return;
+  }
+  const novoNumero = msgLower.split(' ')[1]?.replace(/\D/g, '');
+  if (!novoNumero || novoNumero.length < 10) {
+    await sock.sendMessage(from, {
+      text: '⚠️ Use: novodono 5511999999999'
+    }, { quoted: msg });
+    return;
+  }
+  donoInfo.numerodono = novoNumero;
+  fs.writeFileSync('./dono/info.json', JSON.stringify(donoInfo, null, 2));
+  await sock.sendMessage(from, {
+    text: `✅ Número do dono atualizado com sucesso para:\n📞 ${novoNumero}`
+  }, { quoted: msg });
+}
+
+else if (isGroup && msgLower.startsWith('banghost')) {
+  try {
+    const donoRaw = JSON.parse(fs.readFileSync('./dono/info.json', 'utf-8')).numerodono;
+    const dono = donoRaw.replace(/\D/g, '');
+    const senderRaw = msg.key.participant || msg.key.remoteJid || '';
+    const senderSemDDD = String(senderRaw).split('@')[0].replace(/\D/g, '');
+    
+    if (senderSemDDD !== dono) {
+      await sock.sendMessage(from, {
+        text: '❌ Apenas o dono do bot pode usar este comando.'
+      }, { quoted: msg });
+      return;
+    }
+    const filePath = './dados/contador.json';
+    if (!fs.existsSync(filePath)) {
+      await sock.sendMessage(from, {
+        text: '❌ Nenhum contador encontrado.'
+      }, { quoted: msg });
+      return;
+    }
+    const dados = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+    const contadorGrupo = dados[from]?.usuarios || {};
+    const metadata = await sock.groupMetadata(from);
+    const admins = metadata.participants.filter(p => p.admin !== null).map(p => p.id);
+    const jidDono = dono + '@s.whatsapp.net';
+    const jidBot = sock.user.id;
+    const membrosRemover = metadata.participants.filter(p => {
+      if (p.id === jidDono) return false;
+      if (p.id === jidBot) return false;
+      if (admins.includes(p.id)) return false;     
+      const usuarioContador = contadorGrupo[p.id];
+      if (!usuarioContador) return true;
+      if (typeof usuarioContador.mensagens !== 'number') return true;
+      return usuarioContador.mensagens === 0;
+    }).map(p => p.id);
+    if (membrosRemover.length === 0) {
+      await sock.sendMessage(from, {
+        text: 'Nenhum membro com 0 mensagens encontrado'
+      }, { quoted: msg });
+      return;
+    }
+    const removerEmLotes = async (lista, tamanho = 3) => {
+      for (let i = 0; i < lista.length; i += tamanho) {
+        const lote = lista.slice(i, i + tamanho);
+        try {
+          await sock.groupParticipantsUpdate(from, lote, 'remove');
+        } catch (e) {
+          console.error(`Erro ao remover membros: ${e}`);
+        }
+        await new Promise(resolve => setTimeout(resolve, 2200));
+      }
+    };
+    await sock.sendMessage(from, {
+      text: `🔪 Removendo ${membrosRemover.length} membro(s) com 0 mensagens ou sem dados...`
+    }, { quoted: msg });
+    await removerEmLotes(membrosRemover);
+    await sock.sendMessage(from, {
+      text: 'Remoção concluída🫡'
+    }, { quoted: msg });
+
+  } catch (err) {
+    console.error('Erro no comando banghost:', err);
+    await sock.sendMessage(from, {
+      text: '❌ Ocorreu um erro ao executar o comando.'
+    }, { quoted: msg });
+  }
+}
+
+else if (isGroup && /^([#])?(b|ban|kick)\b/i.test(msgLower)) {
+  const botNumber = sock.user.id.split(':')[0] + '@s.whatsapp.net';
+  const groupMetadata = await getGroupMetadataCached(from, sock);
+  const botParticipant = groupMetadata.participants.find(p => p.id === botNumber);
+  const botIsAdmin = botParticipant?.admin === 'admin' || botParticipant?.admin === 'superadmin';
+  if (!botIsAdmin) {
+    await sock.sendMessage(from, { text: 'Eu preciso ser administrador' }, { quoted: msg });
+    return;
+  }
+
+  const senderId = msg.key.participant || msg.key.remoteJid;
+  const senderParticipant = groupMetadata.participants.find(p => p.id === senderId);
+  const senderIsAdmin = senderParticipant?.admin === 'admin' || senderParticipant?.admin === 'superadmin';
+  if (!senderIsAdmin) {
+    await sock.sendMessage(from, { text: '❌ Apenas administradores podem usar esse comando.' }, { quoted: msg });
+    return;
+  }
+
+  try {
+    await sock.sendMessage(from, { react: { text: '🙇🏻‍♀️', key: msg.key } });
+  } catch {}
+
+  const contextInfo =
+    msg.message?.extendedTextMessage?.contextInfo ||
+    msg.message?.ephemeralMessage?.message?.extendedTextMessage?.contextInfo ||
+    msg.message?.[Object.keys(msg.message)[0]]?.contextInfo ||
+    {};
+
+  const mentioned = contextInfo.mentionedJid || [];
+  const quotedParticipant = contextInfo.participant || null;
+  const quotedMsgSender = contextInfo.stanzaId && contextInfo.remoteJid
+    ? contextInfo.participant || contextInfo.remoteJid.split('@')[0] + '@s.whatsapp.net'
+    : null;
+
+  const alvos = new Set(mentioned);
+  if (quotedParticipant) alvos.add(quotedParticipant);
+  if (quotedMsgSender) alvos.add(quotedMsgSender);
+
+  if (alvos.size === 0) {
+    await sock.sendMessage(from, {
+      text: '❌ Marque alguém com @ ou responda à msg.',
+      quoted: msg
+    });
+    return;
+  }
+
+  for (const jid of alvos) {
+    if (jid === botNumber) {
+      await sock.sendMessage(from, { text: 'coe mane acha q sou burra🙎‍♀️' }, { quoted: msg });
+      continue;
+    }
+    try {
+      await sock.groupParticipantsUpdate(from, [jid], 'remove');
+      await sock.sendMessage(from, {
+        text: `@${jid.split('@')[0]} foi de arasta ⚰️`,
+        mentions: [jid]
+      }, { quoted: msg });
+    } catch (e) {
+      await sock.sendMessage(from, {
+        text: `❌ Erro ao banir @${jid.split('@')[0]}`,
+        mentions: [jid]
+      }, { quoted: msg });
+    }
+  }
+}
+
+else if (isGroup && /^([#])?bam\b/i.test(msgLower)) {
+  const botNumber = sock.user.id.split(':')[0] + '@s.whatsapp.net';
+  const groupMetadata = await getGroupMetadataCached(from, sock);
+  const botParticipant = groupMetadata.participants.find(p => p.id === botNumber);
+  const botIsAdmin = botParticipant?.admin === 'admin' || botParticipant?.admin === 'superadmin';
+  if (!botIsAdmin) {
+    await sock.sendMessage(from, { text: '⚠️ Eu preciso ser administrador para remover membros.' }, { quoted: msg });
+    return;
+  }
+  const senderId = msg.key.participant || msg.key.remoteJid;
+  const senderParticipant = groupMetadata.participants.find(p => p.id === senderId);
+  const senderIsAdmin = senderParticipant?.admin === 'admin' || senderParticipant?.admin === 'superadmin';
+  if (!senderIsAdmin) {
+    await sock.sendMessage(from, { text: '❌ Apenas administradores podem usar esse comando.' }, { quoted: msg });
+    return;
+  }
+  const contextInfo =
+    msg.message?.extendedTextMessage?.contextInfo ||
+    msg.message?.ephemeralMessage?.message?.extendedTextMessage?.contextInfo ||
+    msg.message?.[Object.keys(msg.message)[0]]?.contextInfo ||
+    {};
+  const mentioned = contextInfo.mentionedJid || [];
+  const quotedParticipant = contextInfo.participant || null;
+  const alvos = new Set(mentioned);
+  if (quotedParticipant) alvos.add(quotedParticipant);
+  if (alvos.size === 0) {
+    await sock.sendMessage(from, {
+      text: '❌ Marque alguém com @ ou responda à mensagem da pessoa que deseja banir.',
+      quoted: msg
+    });
+    return;
+  }
+  for (const jid of alvos) {
+    if (jid === botNumber) {
+      await sock.sendMessage(from, { text: 'brinca muito kk🧜🏻‍♀️.' }, { quoted: msg });
+      continue;
+    }
+    try {
+      await sock.groupParticipantsUpdate(from, [jid], 'remove');
+      await sock.sendMessage(from, {
+        text: `@${jid.split('@')[0]} foi de arasta ⚰️💤`,
+        mentions: [jid]
+      }, { quoted: msg });
+    } catch (e) {
+      await sock.sendMessage(from, {
+        text: `❌ Erro ao banir @${jid.split('@')[0]}`,
+        mentions: [jid]
+      }, { quoted: msg });
+    }
+  }
+}
+
+else if (isGroup && msgLower === 'antifake') {
+  let nomeGrupo = '';
+  try {
+    const grupoInfo = await sock.groupMetadata(from);
+    nomeGrupo = grupoInfo.subject || '';
+  } catch (e) {
+    console.error('Erro ao obter nome do grupo no comando antifake:', e);
+  }
+  const configPath = path.join(__dirname, 'dados', 'grupos', `${from}.json`);
+  let configGrupo = {};
+  try {
+    if (fs.existsSync(configPath)) {
+      const raw = fs.readFileSync(configPath);
+      configGrupo = JSON.parse(raw);
+    } else {
+      configGrupo = { nome: nomeGrupo };
+    }
+  } catch (e) {
+    console.error('Erro ao ler config do grupo:', e);
+    configGrupo = { nome: nomeGrupo };
+  }
+  let dono = '';
+  try {
+    dono = JSON.parse(fs.readFileSync('./dono/info.json')).numerodono;
+  } catch (e) {
+    console.error('Erro ao ler info.json do dono:', e);
+  }
+  const senderSemDDD = String(sender).split('@')[0].replace(/\D/g, '');
+  if (!isGroupAdmin && senderSemDDD !== dono) {
+    await sock.sendMessage(from, {
+      text: '❌ Apenas administradores ou o dono podem usar este comando.'
+    }, { quoted: msg });
+    return;
+  }
+  configGrupo.antifake = !configGrupo.antifake;
+  try {
+    fs.writeFileSync(configPath, JSON.stringify(configGrupo, null, 2));
+  } catch (e) {
+    console.error('Erro ao salvar config do grupo:', e);
+    await sock.sendMessage(from, {
+      text: '❌ Erro ao salvar a configuração.'
+    }, { quoted: msg });
+    return;
+  }
+  const status = configGrupo.antifake ? 'ativado' : 'desativado';
+  await sock.sendMessage(from, {
+    text: `🕵️ Sistema *AntiFake* ${status}!`
+  }, { quoted: msg });
+}
+
+else if (
+  /^calcular\s+[0-9+\-*/×().\s]+$/i.test(body) &&
+  /[+\-*/×]/.test(body) // Garante que tenha pelo menos um operador
+) {
+  try {
+    // Pega só a parte depois da palavra "calcular"
+    let expressao = body.replace(/^calcular\s+/i, '').trim();
+
+    // Substitui símbolo de multiplicação × por *
+    expressao = expressao.replace(/×/g, '*').replace(/x/gi, '*');
+
+    const resultado = eval(expressao);
+    const operadores = expressao.match(/[+\-*/]/g) || [];
+    const dificuldade = operadores.length + expressao.length / 10;
+    let frase = '';
+    
+    if (dificuldade > 20) {
+      frase = '😵‍💫 Que complexidade, quase tive que chamar reforços! 🔥';
+    } else if (dificuldade > 15) {
+      frase = '😅 Isso aqui foi missão impossível, mas venci! 💪';
+    } else if (dificuldade > 10) {
+      frase = '😹 Caramba, essa foi braba! Quase que eu quebrei a cabeça!';
+    } else if (dificuldade > 7) {
+      frase = '🤔 Essa deu um trabalho, mas consegui! 🧠';
+    } else if (dificuldade > 4) {
+      frase = '😎 Fácil, moleza! Pode mandar mais! 😏';
+    } else if (dificuldade > 1) {
+      frase = '😉 Tranquilo, na boa! Pode continuar! 🎉';
+    } else {
+      frase = '😌 Facin facin, manda mais! 😉';
+    }
+
+    await sock.sendMessage(from, {
+      text: `Resultado:\n${expressao} = *${resultado}*\n\n${frase}`
+    }, { quoted: msg });
+
+  } catch (e) {
+    console.error('Erro ao calcular expressão:', e);
+    await sock.sendMessage(from, { text: '❌ Não consegui calcular essa conta.' }, { quoted: msg });
+  }
+  return;
+}
+
+ else if (isGroup && msgLower.startsWith('bemvindo')) {
+  if (!isGroupAdmin) {
+    await sock.sendMessage(from, { text: '❌ Apenas administradores podem usar este comando.' }, { quoted: msg });
+    return;
+  }
+
+  let nomeGrupo = '';
+  try {
+    const grupoInfo = await sock.groupMetadata(from);
+    nomeGrupo = grupoInfo.subject || '';
+  } catch (e) {
+    console.error('Erro ao obter nome do grupo no comando bemvindo:', e);
+  }
+
+  const configGrupo = carregarConfigGrupo(from, nomeGrupo);
+
+  configGrupo.bemvindo = !configGrupo.bemvindo;
+  salvarConfigGrupo(from, configGrupo);
+  await sock.sendMessage(
+    from,
+    { text: `𝗕𝗼𝗮𝘀-𝘃𝗶𝗻𝗱𝗮𝘀 ${configGrupo.bemvindo ? 'ativado' : 'desativado'} \nCaso queira personalizar digite legendabv!` },
+    { quoted: msg }
+  );
+} else if (isGroup && msgLower.startsWith('legendabv')) {
+  if (!isGroupAdmin) {
+    await sock.sendMessage(from, {
+      text: '❌ Apenas administradores podem usar este comando.'
+    }, { quoted: msg });
+    return;
+  }
+
+  let nomeGrupo = '';
+  try {
+    const grupoInfo = await sock.groupMetadata(from);
+    nomeGrupo = grupoInfo.subject || '';
+  } catch (e) {
+    console.error('Erro ao obter nome do grupo no comando legendabv:', e);
+  }
+
+  const configGrupo = carregarConfigGrupo(from, nomeGrupo);
+
+  const novoTexto = text.slice('legendabv'.length).trim();
+  if (novoTexto.length < 5) {
+    await sock.sendMessage(from, {
+      text: 'Use legendabv oi #𝗺𝗲𝗺𝗯𝗿𝗼# seja bem vindo(a) ao #𝗴𝗿𝘂𝗽𝗼#\n \n#𝗺𝗲𝗺𝗯𝗿𝗼# serve para marcar o usuario\n \n#𝗴𝗿𝘂𝗽𝗼# serve para exibir o nome do grupo\n \n❌ Por favor, envie uma mensagem de boas-vindas com pelo menos 5 caracteres.\n _Isso tudo é opcional, personalize do jeito que quiser, boa sorte💚_'
+    }, { quoted: msg });
+    return;
+  }
+  configGrupo.legendabv = novoTexto;
+  salvarConfigGrupo(from, configGrupo);
+  await sock.sendMessage(from, {
+    text: '✅𝗠𝗲𝗻𝘀𝗮𝗴𝗲𝗺 𝗱𝗲 𝗯𝗼𝗮𝘀-𝘃𝗶𝗻𝗱𝗮𝘀 𝗮𝘁𝘂𝗮𝗹𝗶𝘇𝗮𝗱𝗮!'
+  }, { quoted: msg });
+ }
+}
+
+module.exports = {
+  executarComandos,
+  carregarConfigGrupo,
+  cmdVIP,
+  saveCmdVIP,
+  reloadCmdVIP,
+  salvarConfigGrupo
+};
